@@ -227,10 +227,14 @@ namespace ScriptEngine.HostedScript.Library
         [ContextMethod("ОбъединитьПути", "CombinePath")]
         public string CombinePath(string path1, string path2, string path3 = null)
         {
+            var path2_1 = (Path.IsPathRooted(path2) ? path2.Substring(1) : path2);
+
             if (path3 == null)
-                return Path.Combine(path1, path2);
-            else
-                return Path.Combine(path1, path2, path3);
+                return Path.Combine(path1, path2_1);
+            else{
+                var path3_1 = (Path.IsPathRooted(path3) ? path3.Substring(1) : path3);
+                return Path.Combine(path1, path2_1, path3_1);
+            }
         }
 
         public static IAttachableContext CreateInstance()
