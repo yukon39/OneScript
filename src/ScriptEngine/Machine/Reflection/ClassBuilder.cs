@@ -43,6 +43,19 @@ namespace ScriptEngine.Machine.Reflection
             if(mi == null)
                 throw new InvalidOperationException($"Method '{methodName}' not found in {typeof(T)}");
 
+            ExportClassMethod(mi);
+            return this;
+        }
+
+        public ClassBuilder<T> ExportClassMethod(SysReflection.MethodInfo nativeMethod)
+        {
+            if(nativeMethod == null)
+                throw new ArgumentNullException(nameof(nativeMethod));
+
+            if (nativeMethod.ReflectedType != typeof(T))
+                throw new InvalidOperationException($"Method '{nativeMethod.Name}' not found in {typeof(T)}");
+
+            _methods.Add(nativeMethod);
             return this;
         }
 
@@ -129,6 +142,9 @@ namespace ScriptEngine.Machine.Reflection
             for (int i = 0; i < Module.Methods.Length; i++)
             {
                 var methodDescriptor = Module.Methods[i];
+                if(methodDescriptor.Signature.Name == Compiler.Compiler.BODY_METHOD_NAME)
+                    continue;
+
                 var methInfo = CreateMethodInfo(methodDescriptor.Signature);
                 _methods.Add(methInfo);
             }
@@ -148,7 +164,17 @@ namespace ScriptEngine.Machine.Reflection
                 var reflectedParam = new ReflectedParamInfo(currentParam.Name, currentParam.IsByValue);
                 reflectedParam.SetOwner(reflectedMethod);
                 reflectedParam.SetPosition(i);
+                foreach (var annotation in currentParam.Annotations)
+                {
+                    reflectedParam.AddAnnotation(annotation);
+                }
+
                 reflectedMethod.Parameters.Add(reflectedParam);
+            }
+
+            foreach (var annotation in methInfo.Annotations)
+            {
+                reflectedMethod.AddAnnotation(annotation);
             }
 
             return reflectedMethod;
