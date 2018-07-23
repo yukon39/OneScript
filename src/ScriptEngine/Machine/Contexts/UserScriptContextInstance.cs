@@ -100,9 +100,7 @@ namespace ScriptEngine.Machine.Contexts
                 _asStringOverride = base.AsString;
             else
             {
-                var signature = GetMethodInfo(methId);
-                if (signature.ArgCount != 2)
-                    throw new RuntimeException("Обработчик получения представления должен иметь 2 параметра");
+                CheckHandlerArgumentCount(methId, 2);
 
                 _asStringOverride = () => GetOverridenPresentation(methId);
             }
@@ -125,6 +123,44 @@ namespace ScriptEngine.Machine.Contexts
                 return base.AsString();
 
             return arguments[0].AsString();
+        }
+
+        protected string OnMethodSearchOverride(string methodName, out bool defaultProcessing)
+        {
+            var methId = GetScriptMethod("ОбработкаПоискаМетода", "MethodSearchProcessing");
+            if (methId == -1)
+            {
+                defaultProcessing = true;
+                return null;
+            }
+
+            CheckHandlerArgumentCount(methId, 3);
+
+            var standard = ValueFactory.Create(true);
+            var searchName = ValueFactory.Create(methodName);
+            var resultName = ValueFactory.Create();
+
+            var arguments = new IValue[3]
+            {
+                Variable.Create(searchName, "methodName"),
+                Variable.Create(resultName, "methodName"),
+                Variable.Create(standard, "standardProcessing")
+            };
+
+            CallScriptMethod(methId, arguments);
+
+            defaultProcessing = arguments[2].AsBoolean();
+            if (defaultProcessing)
+                return null;
+
+            return arguments[1].AsString();
+        }
+
+        private void CheckHandlerArgumentCount(int methId, int paramCount)
+        {
+            var signature = GetMethodInfo(methId);
+            if (signature.ArgCount != paramCount)
+                throw new RuntimeException($"Неверное число параметров обработчика '{signature.Name}'. Ожидается {paramCount}");
         }
 
         public void AddProperty(string name, string alias, IValue value)
@@ -199,6 +235,26 @@ namespace ScriptEngine.Machine.Contexts
         public override string AsString()
         {
             return _asStringOverride();
+        }
+
+        protected override int OnMethodSearchFail(string name)
+        {
+            var newName = OnMethodSearchOverride(name, out var defaultProcessing);
+            if(defaultProcessing)
+                return base.OnMethodSearchFail(name);
+
+            int index = -1;
+            for (int i = 0; i < _module.Methods.Length; i++)
+            {
+                if (_module.Methods[i].Signature.Name.Equals(newName, StringComparison.OrdinalIgnoreCase))
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            return index;
+
         }
     }
 }

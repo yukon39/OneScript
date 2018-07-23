@@ -265,8 +265,22 @@ namespace ScriptEngine.Machine.Contexts
                 if (_methodSearchCache.TryGetValue(name, out index))
                     return index;
                 else
+                {
+                    var newIndex = OnMethodSearchFail(name);
+                    if(newIndex >= 0)
+                    {
+                        _methodSearchCache[name] = newIndex;
+                        return newIndex;
+                    }
+
                     throw RuntimeException.MethodNotFoundException(name, _module.ModuleInfo.ModuleName);
+                }
             }
+        }
+
+        protected virtual int OnMethodSearchFail(string name)
+        {
+            return -1;
         }
 
         public override bool IsPropReadable(int propNum)
