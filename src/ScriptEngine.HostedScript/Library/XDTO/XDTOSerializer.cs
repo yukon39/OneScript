@@ -21,7 +21,10 @@ namespace ScriptEngine.HostedScript.Library.XDTO
         private static readonly XmlNodeTypeEnum xmlNodeEnum = GlobalsManager.GetEnum<XmlNodeTypeEnum>();
 
 
-        private XDTOSerializer() { }
+        private XDTOSerializer()
+        {
+            Factory = new XDTOFactory();
+        }
 
         private void WriteXMLSimpleData(XmlWriterImpl xmlWriter,
                                         string name,
@@ -32,40 +35,37 @@ namespace ScriptEngine.HostedScript.Library.XDTO
         {
             XmlNamespaceContext namespaceContext;
             string xmlValue = XMLString(value);
-            switch (form)
+            if (form == XMLForm.Attribute)
             {
-                case XMLForm.Attribute:
-                    namespaceContext = xmlWriter.NamespaceContext;
-                    AddNamespaceMapping(namespaceContext, xmlWriter, "", XmlSchema.Namespace);
+                namespaceContext = xmlWriter.NamespaceContext;
+                AddNamespaceMapping(namespaceContext, xmlWriter, "", XmlSchema.Namespace);
 
-                    xmlWriter.WriteStartAttribute(name);
-                    xmlWriter.WriteText(xmlValue);
+                xmlWriter.WriteStartAttribute(name);
+                xmlWriter.WriteText(xmlValue);
+                xmlWriter.WriteEndAttribute();
+            }
+            else if (form == XMLForm.Text)
+            {
+                xmlWriter.WriteText(xmlValue);
+            }
+            else
+            {
+                xmlWriter.WriteStartElement(name);
+
+                namespaceContext = xmlWriter.NamespaceContext;
+                AddNamespaceMapping(namespaceContext, xmlWriter, "", XmlSchema.Namespace);
+                AddNamespaceMapping(namespaceContext, xmlWriter, "xsi", XmlSchema.InstanceNamespace);
+
+                if (typeAssigment == XMLTypeAssignment.Explicit)
+                {
+                    xmlWriter.WriteStartAttribute("type", XmlSchema.InstanceNamespace);
+                    xmlWriter.WriteText(type.LocalName);
                     xmlWriter.WriteEndAttribute();
-                    break;
+                }
 
-                case XMLForm.Text:
-                    xmlWriter.WriteText(xmlValue);
-                    break;
+                xmlWriter.WriteText(xmlValue);
 
-                default:
-
-                    xmlWriter.WriteStartElement(name);
-
-                    namespaceContext = xmlWriter.NamespaceContext;
-                    AddNamespaceMapping(namespaceContext, xmlWriter, "", XmlSchema.Namespace);
-                    AddNamespaceMapping(namespaceContext, xmlWriter, "xsi", XmlSchema.InstanceNamespace);
-
-                    if (typeAssigment == XMLTypeAssignment.Explicit)
-                    {
-                        xmlWriter.WriteStartAttribute("type", XmlSchema.InstanceNamespace);
-                        xmlWriter.WriteText(type.LocalName);
-                        xmlWriter.WriteEndAttribute();
-                    }
-
-                    xmlWriter.WriteText(xmlValue);
-
-                    xmlWriter.WriteEndElement();
-                    break;
+                xmlWriter.WriteEndElement();
             }
         }
 
@@ -96,7 +96,7 @@ namespace ScriptEngine.HostedScript.Library.XDTO
         #region Properties
 
         [ContextProperty("Фабрика", "Factory")]
-        public IValue Factory { get; }
+        public XDTOFactory Factory { get; }
 
         #endregion
 
@@ -118,8 +118,12 @@ namespace ScriptEngine.HostedScript.Library.XDTO
         public void WriteXML(XmlWriterImpl xmlWriter,
                              IValue value,
                              XMLTypeAssignment typeAssigment = XMLTypeAssignment.Implicit,
-                             XMLForm form = XMLForm.Element)
+                             IValue valueForm = null)
         {
+            XMLForm form = XMLForm.Element;
+            if (valueForm is XMLForm xmlForm)
+                form = xmlForm;
+
             switch (value.DataType)
             {
                 case DataType.Undefined:
@@ -165,8 +169,12 @@ namespace ScriptEngine.HostedScript.Library.XDTO
                              IValue value,
                              string name,
                              XMLTypeAssignment typeAssigment = XMLTypeAssignment.Implicit,
-                             XMLForm form = XMLForm.Element)
+                             IValue valueForm = null)
         {
+            XMLForm form = XMLForm.Element;
+            if (valueForm is XMLForm xmlForm)
+                form = xmlForm;
+
             XMLExpandedName xmlType;
             switch (value.DataType)
             {
