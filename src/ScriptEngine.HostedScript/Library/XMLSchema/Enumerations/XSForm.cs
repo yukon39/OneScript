@@ -18,6 +18,10 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
         {
         }
 
+        public static XSForm Qualified => FromNativeValue(XmlSchemaForm.Qualified);
+
+        public static XSForm Unqualified => FromNativeValue(XmlSchemaForm.Unqualified);
+
         public static XSForm FromNativeValue(XmlSchemaForm native) => EnumerationXSForm.FromNativeValue(native);
 
         public static XmlSchemaForm ToNativeValue(XSForm wrapper) => wrapper.UnderlyingValue;

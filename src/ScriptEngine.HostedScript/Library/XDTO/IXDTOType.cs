@@ -12,5 +12,7 @@ namespace ScriptEngine.HostedScript.Library.XDTO
     public interface IXDTOType : IValue
     {
         string Name { get; }
+
+        string NamespaceURI { get; }
     }
 }

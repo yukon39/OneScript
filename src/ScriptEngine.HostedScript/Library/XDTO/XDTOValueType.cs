@@ -6,6 +6,7 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
 using System;
+using ScriptEngine.HostedScript.Library.Xml;
 using ScriptEngine.HostedScript.Library.XMLSchema;
 using ScriptEngine.Machine;
 using ScriptEngine.Machine.Contexts;
@@ -15,13 +16,28 @@ namespace ScriptEngine.HostedScript.Library.XDTO
     [ContextClass("ТипЗначенияXDTO", "XDTOValueType")]
     public class XDTOValueType : AutoContext<XDTOValueType>, IXDTOType
     {
-        internal XDTOValueType(XSSimpleTypeDefinition typeDefinition)
+        private readonly XDTOTypeRefence _baseType;
+        private XDTOValueType()
+        {
+            MemberTypes = null;
+            Facets = null;
+            _baseType = null;
+        }
+
+        internal XDTOValueType(XSSimpleTypeDefinition typeDefinition, XDTOFactory factory)
+            : this()
         {
             NamespaceURI = typeDefinition.NamespaceURI;
             Name = typeDefinition.Name;
+
+            factory.RegisterType(this);
+
             if (typeDefinition.Variety == XSSimpleTypeVariety.Atomic)
             {
                 Variety = XDTOVariety.Atomic;
+
+                if (typeDefinition.BaseTypeName is XMLExpandedName expandedName)
+                    _baseType = factory.GetTypeRefence(expandedName);
             }
             else if (typeDefinition.Variety == XSSimpleTypeVariety.List)
             {
@@ -41,6 +57,9 @@ namespace ScriptEngine.HostedScript.Library.XDTO
                 return false;
         }
 
+        public override string ToString() => $"{{{NamespaceURI}}}{Name}";
+        public override string AsString() => ToString();
+
         #region OneScript
 
         #region Properties
@@ -55,7 +74,7 @@ namespace ScriptEngine.HostedScript.Library.XDTO
         public XDTOVariety Variety { get; }
 
         [ContextProperty("БазовыйТип", "BaseType")]
-        public XDTOValueType BaseType { get; }
+        public XDTOValueType BaseType => _baseType?.Type as XDTOValueType;
 
         [ContextProperty("ТипыЧленовОбъединения", "MemberTypes")]
         public XDTOValueTypeCollection MemberTypes { get; }

@@ -7,19 +7,42 @@ at http://mozilla.org/MPL/2.0/.
 
 using System.Collections;
 using System.Collections.Generic;
+using ScriptEngine.HostedScript.Library.XMLSchema;
 using ScriptEngine.Machine.Contexts;
 
 namespace ScriptEngine.HostedScript.Library.XDTO
 {
     [ContextClass("КоллекцияПакетовXDTO", "XDTOPackageCollection")]
-    public class XDTOPackageCollection : AutoContext<XDTOValueTypeCollection>, ICollectionContext, IEnumerable<XDTOPackage>
+    public class XDTOPackageCollection : AutoContext<XDTOPackageCollection>, ICollectionContext, IEnumerable<XDTOPackage>
     {
         private readonly List<XDTOPackage> _items;
+        private readonly XDTOFactory _factory;
 
         internal XDTOPackageCollection()
         {
             _items = new List<XDTOPackage>();
+            _factory = null;
         }
+
+        internal XDTOPackageCollection(XMLSchemaSet schemaSet, XDTOFactory factory)
+            : this()
+        {
+            _factory = factory;
+
+            foreach (XMLSchema.XMLSchema schema in schemaSet)
+            {
+                _items.Add(new XDTOPackage(schema, factory));
+            }
+
+            System.Xml.Schema.XmlSchemaSet native = schemaSet.NativeValue();
+            SystemLogger.Write($"OScript {schemaSet.Count()}");
+            SystemLogger.Write($"Native {schemaSet.NativeValue().Count}");
+
+            ICollection ss = native.Schemas("http://www.w3.org/2001/XMLSchema");
+            SystemLogger.Write($"XMLSchema {ss.Count}");
+        }
+
+        internal void Add(XDTOPackage package) => _items.Add(package);
 
         #region OneScript
 

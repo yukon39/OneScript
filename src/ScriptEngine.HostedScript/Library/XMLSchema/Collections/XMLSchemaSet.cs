@@ -19,12 +19,14 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
     {
         private readonly XmlSchemaSet _schemaSet;
         private readonly List<XMLSchema> _items;
-        private XMLSchemaSet()
+        public XMLSchemaSet()
         {
             _items = new List<XMLSchema>();
             _schemaSet = new XmlSchemaSet();
             _schemaSet.ValidationEventHandler += SchemaSet_ValidationError;
         }
+
+        public XmlSchemaSet NativeValue() => _schemaSet;
 
         #region OneScript
 

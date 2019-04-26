@@ -23,7 +23,7 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
         private XMLExpandedName _itemTypeName;
         private XSSimpleTypeVariety _variety;
 
-        private XSSimpleTypeDefinition()
+        public XSSimpleTypeDefinition()
         {
             _type = new XmlSchemaSimpleType();
             Facets = new XSComponentList();
@@ -116,7 +116,7 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
         public IXSComponent RootContainer { get; private set; }
 
         [ContextProperty("Схема", "Schema")]
-        public XMLSchema Schema => RootContainer.Schema;
+        public XMLSchema Schema => RootContainer?.Schema;
 
         [ContextProperty("ТипКомпоненты", "ComponentType")]
         public XSComponentType ComponentType => XSComponentType.SimpleTypeDefinition;
@@ -125,7 +125,7 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
         public IValue DOMElement => ValueFactory.Create();
 
         [ContextProperty("URIПространстваИмен", "NamespaceURI")]
-        public string NamespaceURI => _type.SourceUri;
+        public string NamespaceURI => Schema?.TargetNamespace;
 
         [ContextProperty("Имя", "Name")]
         public string Name

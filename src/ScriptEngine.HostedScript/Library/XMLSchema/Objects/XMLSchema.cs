@@ -22,7 +22,7 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
     {
         private readonly XmlSchema _schema;
 
-        private XMLSchema()
+        public XMLSchema()
         {
             _schema = new XmlSchema();
             Components = new XSComponentFixedList();
@@ -142,7 +142,7 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
         public IValue DOMElement => null;
 
         [ContextProperty("URIПространстваИменСхемыДляСхемыXML", "SchemaForSchemaNamespaceURI")]
-        public string Namespace => XmlSchema.Namespace;
+        public string SchemaForSchemaNamespaceURI => XmlSchema.Namespace;
 
         [ContextProperty("Аннотации", "Annotations")]
         public XSComponentFixedList Annotations { get; }

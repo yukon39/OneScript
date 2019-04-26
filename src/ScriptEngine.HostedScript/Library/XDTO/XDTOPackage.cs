@@ -8,6 +8,7 @@ at http://mozilla.org/MPL/2.0/.
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using ScriptEngine.HostedScript.Library.XMLSchema;
 using ScriptEngine.Machine;
 using ScriptEngine.Machine.Contexts;
 
@@ -18,7 +19,26 @@ namespace ScriptEngine.HostedScript.Library.XDTO
     {
         private readonly List<IXDTOType> _items;
 
-        internal XDTOPackage() => _items = new List<IXDTOType>();
+        private XDTOPackage()
+        {
+            _items = new List<IXDTOType>();
+            Dependencies = new XDTOPackageCollection();
+            RootProperties = new XDTOPropertyCollection();
+        }
+
+        internal XDTOPackage(XMLSchema.XMLSchema schema, XDTOFactory factory) 
+            : this()
+        {
+            AttributeFormQualified = schema.AttributeFormDefault == XSForm.Qualified;
+            ElementFormQualified = schema.ElementFormDefault == XSForm.Qualified;
+            NamespaceURI = schema.TargetNamespace;
+            
+            foreach (IXSType type in schema.TypeDefinitions)
+            {
+                if (type is XSSimpleTypeDefinition simpleType)
+                    _items.Add(new XDTOValueType(simpleType, factory));
+            }
+        }
 
         #region OneScript
 

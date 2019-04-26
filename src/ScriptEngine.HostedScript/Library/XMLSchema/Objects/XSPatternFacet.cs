@@ -18,7 +18,7 @@ namespace ScriptEngine.HostedScript.Library.XMLSchema
         private readonly XmlSchemaPatternFacet _facet;
         private XSAnnotation _annotation;
 
-        private XSPatternFacet() => _facet = new XmlSchemaPatternFacet();
+        public XSPatternFacet() => _facet = new XmlSchemaPatternFacet();
 
         internal XSPatternFacet(XmlSchemaPatternFacet patternFacet)
         {
