@@ -6,9 +6,6 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
 namespace ScriptEngine
 {
@@ -25,6 +22,11 @@ namespace ScriptEngine
                 throw new ArgumentNullException();
 
             _writer = writer;
+        }
+
+        public static void Reset()
+        {
+            _writer = new NullWriter();
         }
 
         public static void Write(string text)

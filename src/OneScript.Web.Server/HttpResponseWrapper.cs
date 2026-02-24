@@ -1,0 +1,105 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the
+Mozilla Public License, v.2.0. If a copy of the MPL
+was not distributed with this file, You can obtain one
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using Microsoft.AspNetCore.Http;
+using OneScript.Contexts;
+using OneScript.StandardLibrary.Binary;
+using OneScript.StandardLibrary.Json;
+using OneScript.StandardLibrary.Text;
+using OneScript.Values;
+using ScriptEngine.Machine;
+using ScriptEngine.Machine.Contexts;
+using System.Text;
+using OneScript.Execution;
+
+namespace OneScript.Web.Server
+{
+    [ContextClass("HTTPСервисОтвет", "HTTPServiceResponse")]
+    public class HttpResponseWrapper : AutoContext<HttpResponseWrapper>
+    {
+        private readonly HttpResponse _response;
+        private readonly PropertyWrappersCollection _wrappers = new();
+
+        public HttpResponseWrapper(HttpResponse response)
+        {
+            _response = response;
+        }
+
+        [ContextProperty("Начат", "HasStarted", CanWrite = false)]
+        public bool HasStarted => _response.HasStarted;
+
+        [ContextProperty("ТипКонтента", "ContentType")]
+        public string ContentType
+        {
+            get => _response.ContentType;
+            set => _response.ContentType = value;
+        }
+
+        [ContextProperty("ДлинаКонтента", "ContentLength")]
+        public IValue ContentLength
+        {
+            get
+            {
+                if (_response.ContentLength == null)
+                    return BslUndefinedValue.Instance;
+                else
+                    return BslNumericValue.Create((decimal)_response.ContentLength);
+            }
+            set
+            {
+                if (value == null || value == BslUndefinedValue.Instance)
+                    _response.ContentLength = null;
+                else
+                    _response.ContentLength = (long)value.AsNumber();
+            }
+        }
+
+        [ContextProperty("Тело", "Body", CanWrite = false)]
+        public GenericStream Body => _wrappers.Get(nameof(Body), () => new GenericStream(_response.Body));
+
+        [ContextProperty("Заголовки", "Headers", CanWrite = false)]
+        public HeaderDictionaryWrapper Headers =>
+            _wrappers.Get(nameof(Headers), () => new HeaderDictionaryWrapper(_response.Headers));
+
+        [ContextProperty("КодСостояния", "StatusCode")]
+        public int StatusCode
+        {
+            get => _response.StatusCode;
+            set => _response.StatusCode = value;
+        }
+
+        [ContextProperty("Куки", "Cookie", CanWrite = false)]
+        public ResponseCookiesWrapper Cookies => _wrappers.Get(nameof(Cookies), () => new ResponseCookiesWrapper(_response.Cookies));
+
+        [ContextMethod("Записать", "Write")]
+        public void Write(string strData, IValue encoding = null)
+        {
+            var enc = encoding == null ? Encoding.UTF8 : TextEncodingEnum.GetEncoding(encoding);
+
+            _response.ContentLength = enc.GetByteCount(strData);
+            _response.WriteAsync(strData, enc).Wait();
+        }
+
+        [ContextMethod("ЗаписатьКакJson", "WriteAsJson")]
+        public void WriteJson(IBslProcess process, IValue obj, IValue encoding = null)
+        {
+            var enc = encoding == null ? Encoding.UTF8 : TextEncodingEnum.GetEncoding(encoding);
+
+            var writer = new JSONWriter();
+            writer.SetString();
+
+            var jsonFunctions = GlobalJsonFunctions.CreateInstance() as GlobalJsonFunctions;
+            jsonFunctions.WriteJSON(process, writer, obj);
+
+            var data = writer.Close();
+
+            _response.ContentType = $"application/json;charset={enc.WebName}";
+            _response.ContentLength = enc.GetByteCount(data);
+            _response.WriteAsync(data, enc).Wait();
+        }
+    }
+}

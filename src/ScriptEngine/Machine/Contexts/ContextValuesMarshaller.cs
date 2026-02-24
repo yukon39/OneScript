@@ -5,80 +5,193 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Types;
+using OneScript.Values;
 
 namespace ScriptEngine.Machine.Contexts
 {
     public static class ContextValuesMarshaller
     {
-        public static T ConvertParam<T>(IValue value)
+        public static MethodInfo BslParameterConverter { get; private set; }
+        public static MethodInfo BslGenericParameterConverter { get; private set; }
+        public static MethodInfo BslReturnValueGenericConverter { get; private set; }
+
+        static ContextValuesMarshaller()
         {
-            var type = typeof(T);
-            object valueObj = ConvertParam(value, type);
-            if (valueObj == null)
-            {
-                return default(T);
-            }
+            BslParameterConverter = typeof(ContextValuesMarshaller).GetMethods()
+                .First(x => x.Name == nameof(ConvertParam) && x.GetGenericArguments().Length == 0 &&
+                            x.GetParameters().Length == 4);
             
+            BslGenericParameterConverter = typeof(ContextValuesMarshaller).GetMethods()
+                .First(x => x.Name == nameof(ConvertParam) && x.GetGenericArguments().Length == 1 &&
+                            x.GetParameters().Length == 3);
+            
+            BslReturnValueGenericConverter = typeof(ContextValuesMarshaller).GetMethods()
+                .First(x => x.Name == nameof(ConvertReturnValue) && x.GetGenericArguments().Length == 1);
+        }
+        
+        /// <summary>
+        /// Выполняет конвертацию значения из Bsl в значение параметра метода C#
+        /// </summary>
+        /// <param name="value">Универсальное значение из Bsl</param>
+        /// <param name="type">Целевой тип в который надо сконвертировать значение.</param>
+        /// <param name="defaultValue">Значение по умолчанию, которое будет возвращено, если <paramref name="value"/> не заполнен.</param>
+        /// <param name="process">Текущий BSL-процесс, в рамках которого вызывается метод</param>
+        /// <returns>Значение целевого типа</returns>
+        public static object ConvertParam(IValue value, Type type, object defaultValue, IBslProcess process)
+        {
+            Debug.Assert(defaultValue == null || type.IsInstanceOfType(defaultValue));
+            
+            var converted = ConvertParam(value, type, process);
+            return converted ?? defaultValue;
+        }
+        
+        /// <summary>
+        /// Выполняет конвертацию значения из Bsl в значение параметра метода C#
+        /// </summary>
+        /// <param name="value">Универсальное значение из Bsl</param>
+        /// <param name="type">Целевой тип в который надо сконвертировать значение.</param>
+        /// <param name="process">Текущий BSL-процесс, в рамках которого вызывается метод</param>
+        /// <returns>Значение целевого типа</returns>
+        public static object ConvertParam(IValue value, Type type, IBslProcess process)
+        {
             try
             {
-                return (T)valueObj;
+                return ConvertValueType(value, type, process);
             }
             catch (InvalidCastException)
             {
                 throw RuntimeException.InvalidArgumentType();
             }
-           
+            catch (OverflowException)
+            {
+                throw RuntimeException.InvalidArgumentValue();
+            }
+        }
+        
+        /// <summary>
+        /// Выполняет конвертацию значения из Bsl в значение параметра метода C#.
+        /// В данный метод нельзя передавать значения, конвертация которых в целевой тип (напр. строку)
+        /// может приводить к вызову другого Bsl-кода. Метод выбросит исключение, если конвертация захочет выполнить bsl-код.
+        /// </summary>
+        /// <param name="value">Универсальное значение из Bsl</param>
+        /// <param name="defaultValue">Значение по умолчанию, которое будет возвращено, если <paramref name="value"/> не заполнен.</param>
+        /// <typeparam name="T">Целевой тип в который надо сконвертировать значение</typeparam>
+        /// <returns>Значение целевого типа</returns>
+        public static T ConvertParam<T>(IValue value, T defaultValue = default)
+        {
+            return ConvertParam<T>(value, defaultValue, ForbiddenBslProcess.Instance);
+        }
+        
+        /// <summary>
+        /// Выполняет конвертацию значения из Bsl в значение параметра метода C#
+        /// </summary>
+        /// <param name="value">Универсальное значение из Bsl</param>
+        /// <param name="process">Текущий BSL-процесс, в рамках которого вызывается метод</param>
+        /// <param name="defaultValue">Значение по умолчанию, которое будет возвращено, если <paramref name="value"/> не заполнен.</param>
+        /// <typeparam name="T">Целевой тип в который надо сконвертировать значение</typeparam>
+        /// <returns>Значение целевого типа</returns>
+        public static T ConvertParam<T>(IValue value, T defaultValue, IBslProcess process)
+        {
+            object valueObj = ConvertParam(value, typeof(T), process);
+            return valueObj != null ? (T)valueObj : defaultValue;
+        }
+        
+        /// <summary>
+        /// Выполняет строгую конвертацию параметра в запрошенный тип.
+        /// Не выполняет приведение объектов к строке, в отличие от ConvertParam.
+        /// Это значит, что нельзя скормить объект в C# параметр с типом string через конверсию в AsString.
+        /// Выдает исключение о неверном типе параметра.
+        /// </summary>
+        public static T ConvertValueStrict<T>(IValue value)
+        {
+            if (value == null || value.IsSkippedArgument())
+            {
+                return default;
+            }
+
+            if (value is T t)
+                return t;
+            
+            try
+            {
+                var converted = ConvertToClrObject(value);
+                return converted switch
+                {
+                    T casted => casted,
+                    decimal _ => (T)Convert.ChangeType(converted, typeof(T)),
+                    _ => throw RuntimeException.InvalidArgumentType()
+                };
+            }
+            catch (InvalidCastException)
+            {
+                throw RuntimeException.InvalidArgumentType();
+            }
+            catch (ValueMarshallingException)
+            {
+                throw RuntimeException.InvalidArgumentType();
+            }
         }
 
-        public static T ConvertParam<T>(IValue value, T defaultValue)
+        public static Expression GetDefaultBslValueConstant(Type targetType)
         {
-            var type = typeof(T);
-            object valueObj = ConvertParam(value, type);
-            if (valueObj == null)
+            if (targetType == typeof(string))
             {
-                return defaultValue;
+                return Expression.Constant("");
             }
-            
-            try
-            {
-                return (T)valueObj;
-            }
-            catch (InvalidCastException)
-            {
-                throw RuntimeException.InvalidArgumentType();
-            }
-           
+
+            return Expression.Default(targetType);
         }
 
         public static object ConvertParam(IValue value, Type type)
         {
+            return ConvertParam(value, type, ForbiddenBslProcess.Instance);
+        }
+
+        private static object ConvertValueType(IValue value, Type type, IBslProcess process)
+        {
             object valueObj;
-            if (value == null || value.DataType == DataType.NotAValidValue)
+            if (value == null || value.IsSkippedArgument())
             {
                 return null;
             }
 
             if (Nullable.GetUnderlyingType(type) != null)
             {
-                return ConvertParam(value, Nullable.GetUnderlyingType(type));
+                return ConvertValueType(value, Nullable.GetUnderlyingType(type), process);
             }
 
-            if (type == typeof(IValue))
+            if (type == typeof(IVariable))
+            {
+                return value;
+            }
+
+            if (value is IValueReference r)
+            {
+                // Если целевой тип не требовал именно переменную, то разыменовываем ее
+                value = r.Value;
+            }
+
+            if (type == typeof(IValue) || type == typeof(BslValue))
             {
                 valueObj = value;
             }
-            else if (type == typeof(IVariable))
-            {
-                valueObj = value;
-            }
-            else if (type == typeof(string))
-            {
-                valueObj = value.AsString();
-            }
-            else if (value == SimpleConstantValue.Undefined()) 
+            else if (value.SystemType == BasicTypes.Undefined)
             {
                 // Если тип параметра не IValue и не IVariable && Неопределено -> null
                 valueObj = null;
+            }
+            else if (type == typeof(string))
+            {
+                valueObj = value.AsString(process);
             }
             else if (type == typeof(int))
             {
@@ -130,148 +243,156 @@ namespace ScriptEngine.Machine.Contexts
             }
             else if (typeof(IRuntimeContextInstance).IsAssignableFrom(type))
             {
-                valueObj = value.AsObject();
+                if (value.GetType().IsAssignableTo(type))
+                    valueObj = value.AsObject();
+                else
+                    throw new InvalidCastException();
+            }
+            else if (value is EnumerationValue && typeof(EnumerationValue).IsAssignableFrom(type))
+            {
+                valueObj = value;
             }
             else
             {
-                valueObj = CastToCLRObject(value);
+                if (value is IObjectWrapper wrapped)
+                {
+                    if (!type.IsInstanceOfType(wrapped.UnderlyingObject))
+                        throw new InvalidCastException();
+                }
+                else if (!type.IsInstanceOfType(value))
+                {
+                    throw new InvalidCastException();
+                }
+
+                valueObj = CastToClrObject(value);
             }
 
             return valueObj;
         }
 
-        public static IValue ConvertReturnValue(object objParam, Type type)
+        private static IValue ConvertReturnValue(object objParam, Type type)
         {
             if (objParam == null)
                 return ValueFactory.Create();
 
-            if (type == typeof(IValue))
+            switch (objParam)
             {
-                return (IValue)objParam;
+                case IValue v: return v;
+
+                case string s: return ValueFactory.Create(s);
+                case bool b: return ValueFactory.Create(b);
+                case DateTime d: return ValueFactory.Create(d);
+
+                case int n: return ValueFactory.Create(n);
+                case uint n: return ValueFactory.Create(n);
+                case long n: return ValueFactory.Create(n);
+                case ulong n: return ValueFactory.Create(n);
+                case byte n: return ValueFactory.Create(n);
+                case sbyte n: return ValueFactory.Create(n);
+                case short n: return ValueFactory.Create(n);
+                case ushort n: return ValueFactory.Create(n);
+                case decimal n: return ValueFactory.Create(n);
+                case double n: return ValueFactory.Create((decimal)n);
             }
-            else if (type == typeof(string))
+
+            if (type.IsEnum)
             {
-                return ValueFactory.Create((string)objParam);
-            }
-            else if (type == typeof(int))
-            {
-                return ValueFactory.Create((int)objParam);
-            }
-            else if (type == typeof(uint))
-            {
-                return ValueFactory.Create((uint)objParam);
-            }
-            else if (type == typeof(long))
-            {
-                return ValueFactory.Create((long)objParam);
-            }
-            else if (type == typeof(ulong))
-            {
-                return ValueFactory.Create((ulong)objParam);
-            }
-            else if (type == typeof(decimal))
-            {
-                return ValueFactory.Create((decimal)objParam);
-            }
-            else if (type == typeof(double))
-            {
-                return ValueFactory.Create((decimal)(double)objParam);
-            }
-            else if (type == typeof(DateTime))
-            {
-                return ValueFactory.Create((DateTime)objParam);
-            }
-            else if (type == typeof(bool))
-            {
-                return ValueFactory.Create((bool)objParam);
-            }
-            else if (type.IsEnum)
-            {
-                var wrapperType = typeof(CLREnumValueWrapper<>).MakeGenericType(new Type[] { type });
-                var constructor = wrapperType.GetConstructor(new Type[] { typeof(EnumerationContext), type, typeof(DataType) });
-                var osValue = (EnumerationValue)constructor.Invoke(new object[] { null, objParam, DataType.Enumeration });
-                return osValue;
+                return ConvertEnum(objParam, type);
             }
             else if (typeof(IRuntimeContextInstance).IsAssignableFrom(type))
             {
-                return ValueFactory.Create((IRuntimeContextInstance)objParam);
+                return (IValue)(IRuntimeContextInstance)objParam;
             }
             else if (typeof(IValue).IsAssignableFrom(type))
             {
                 return (IValue)objParam;
             }
+            else if (Nullable.GetUnderlyingType(type) != null)
+            {
+                return ConvertReturnValue(objParam, Nullable.GetUnderlyingType(type));
+            }
             else
             {
-                throw new NotSupportedException($"Type {type} is not supported");
+                throw ValueMarshallingException.TypeNotSupported(type);
             }
+        }
+
+        private static IValue ConvertEnum(object objParam, Type type)
+        {
+            return SimpleEnumsMarshaller.ConvertEnum(objParam, type);
+        }
+
+        public static T ConvertWrappedEnum<T>(IValue enumeration, T defValue) where T : struct
+        {
+            if (enumeration == null)
+                return defValue;
+
+            if (enumeration is ClrEnumValueWrapper<T> wrapped)
+            {
+                return wrapped.UnderlyingValue;
+            }
+
+            throw RuntimeException.InvalidArgumentValue();
+        }
+
+        public static IValue ConvertDynamicValue(object param)
+        {
+            if (param == null)
+                throw ValueMarshallingException.InvalidNullValue();
+
+            return ConvertReturnValue(param, param.GetType());
+        }
+
+        public static IValue ConvertDynamicIndex(object param)
+        {
+            if (param == null)
+                throw ValueMarshallingException.InvalidNullIndex();
+
+            return ConvertReturnValue(param, param.GetType());
         }
 
         public static IValue ConvertReturnValue<TRet>(TRet param)
         {
-            var type = typeof(TRet);
-
-            return ConvertReturnValue(param, type);
+            return ConvertReturnValue(param, typeof(TRet));
         }
 
-		public static object ConvertToCLRObject(IValue val)
+        public static object ConvertToClrObject(IValue value)
 		{
-			object result;
-			if (val == null)
-				return val;
-			
-			switch (val.DataType)
-			{
-			case Machine.DataType.Boolean:
-				result = val.AsBoolean();
-				break;
-			case Machine.DataType.Date:
-				result = val.AsDate();
-				break;
-			case Machine.DataType.Number:
-				result = val.AsNumber();
-				break;
-			case Machine.DataType.String:
-				result = val.AsString();
-				break;
-			case Machine.DataType.Undefined:
-				result = null;
-				break;
-			default:
-                if (val.DataType == DataType.Object)
-                    result = val.AsObject();
+            if (value == null)
+                return null;
 
-				result = val.GetRawValue();
-				if (result is IObjectWrapper)
-					result = ((IObjectWrapper)result).UnderlyingObject;
-				else
-				    throw new ValueMarshallingException($"Тип {val.GetType()} не поддерживает преобразование в CLR-объект");
-
-                break;
-			}
-			
-			return result;
-		}
-
-        public static T CastToCLRObject<T>(IValue val)
-        {
-            return (T)CastToCLRObject(val);
+            // TODO: Вероятно, можно просто заменить на ассерт, что это не IValueReference
+            if (value is IValueReference r)
+                return ConvertToClrObject(r.Value);
+            
+            return value switch
+            {
+                BslNumericValue num => (decimal)num,
+                BslBooleanValue boolean => (bool)boolean,
+                BslStringValue str => (string)str,
+                BslDateValue date => (DateTime)date,
+                BslUndefinedValue _ => null,
+                BslNullValue _ => null,
+                BslTypeValue type => type.SystemType.ImplementingClass,
+                IObjectWrapper wrapper => wrapper.UnderlyingObject,
+                BslObjectValue obj => obj,
+                _ => throw ValueMarshallingException.NoConversionToCLR(value.GetType())
+            };
         }
 
-        public static object CastToCLRObject(IValue val)
+        private static object CastToClrObject(IValue val)
         {
-            var rawValue = val.GetRawValue();
             object objectRef;
-            if (rawValue.DataType == DataType.GenericValue)
+            if (val is IObjectWrapper wrapper)
             {
-                objectRef = rawValue;
+                objectRef = wrapper.UnderlyingObject;
             }
             else
             {
-                objectRef = ConvertToCLRObject(rawValue);
+                objectRef = ConvertToClrObject(val);
             }
 
             return objectRef;
-
         }
     }
 }

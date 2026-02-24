@@ -5,10 +5,7 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using ScriptEngine.Environment;
+using OneScript.Execution;
 using ScriptEngine.Machine;
 
 namespace ScriptEngine.HostedScript
@@ -18,13 +15,19 @@ namespace ScriptEngine.HostedScript
         ScriptingEngine _engine;
 
         readonly IHostApplication _host;
-        readonly LoadedModule _module;
+        readonly IExecutableModule _module;
+        private IBslProcess _bslProcess;
 
-        internal Process(IHostApplication host, LoadedModule src, ScriptingEngine runtime)
+        internal Process(
+            IBslProcess process,
+            IHostApplication host,
+            IExecutableModule src,
+            ScriptingEngine runtime)
         {
             _host = host;
             _engine = runtime;
             _module = src;
+            _bslProcess = process;
         }
 
         public int Start()
@@ -33,8 +36,7 @@ namespace ScriptEngine.HostedScript
 
             try
             {
-                _engine.UpdateContexts();
-                _engine.NewObject(_module);
+                _engine.NewObject(_module, _bslProcess);
                 exitCode = 0;
             }
             catch (ScriptInterruptionException e)
@@ -48,7 +50,7 @@ namespace ScriptEngine.HostedScript
             }
             finally
             {
-                _engine.DebugController?.NotifyProcessExit(exitCode);
+                _engine.Debugger.NotifyProcessExit(exitCode);
                 _engine.Dispose();
                 _engine = null;
             }

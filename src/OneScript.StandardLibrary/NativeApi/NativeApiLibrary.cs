@@ -1,0 +1,118 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the
+Mozilla Public License, v.2.0. If a copy of the MPL
+was not distributed with this file, You can obtain one
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using OneScript.Exceptions;
+using OneScript.Types;
+using ScriptEngine.Machine;
+
+namespace OneScript.StandardLibrary.NativeApi
+{
+    /// <summary>
+    /// Класс, ассоциированный с экземпляром библиотеки внешних компонент 
+    /// Native API и осуществляющий непосредственное создание экземпляра компоненты.
+    /// </summary>
+    class NativeApiLibrary : IDisposable
+    {
+        private delegate IntPtr GetClassNames();
+
+        private readonly List<NativeApiComponent> _components = new List<NativeApiComponent>();
+
+        private readonly String _tempfile;
+
+        public NativeApiLibrary(string filepath, string identifier, ITypeManager typeManager)
+        {
+            if (!File.Exists(filepath))
+                return;
+
+            using (var stream = File.OpenRead(filepath))
+            {
+                if (NativeApiPackage.IsZip(stream))
+                {
+                    _tempfile = Path.GetTempFileName();
+                    NativeApiPackage.Extract(stream, _tempfile);
+                    Module = NativeApiKernel.LoadLibrary(_tempfile);
+                    if (Module == IntPtr.Zero)
+                    {
+                        File.Delete(_tempfile);
+                    }
+                }
+                else 
+                    Module = NativeApiKernel.LoadLibrary(filepath);
+            }
+            if (Loaded) 
+                RegisterComponents(identifier, typeManager);
+        }
+
+        public IntPtr Module { get; private set; } = IntPtr.Zero;
+
+        public Boolean Loaded
+        {
+            get => Module != IntPtr.Zero;
+        }
+
+        private void RegisterComponents(string identifier, ITypeManager typeManager)
+        {
+            var funcPtr = NativeApiKernel.GetProcAddress(Module, "GetClassNames");
+            if (funcPtr == IntPtr.Zero) 
+                throw new RuntimeException("В библиотеке внешних компонент не обнаружена функция: GetClassNames()");
+            var namesPtr = Marshal.GetDelegateForFunctionPointer<GetClassNames>(funcPtr)();
+            if (namesPtr == IntPtr.Zero) 
+                throw new RuntimeException("Не удалось получить список компонент в составе библиотеки");
+            var separator = new char[] { '|' };
+            var names = NativeApiProxy.Str(namesPtr).Split(separator, StringSplitOptions.RemoveEmptyEntries);
+            foreach (String name in names)
+                typeManager.RegisterType($"AddIn.{identifier}.{name}", default, typeof(NativeApiFactory));
+        }
+
+        public IValue CreateComponent(ITypeManager typeManager, object host, String typeName, String componentName)
+        {
+            var typeDef = typeManager.GetTypeByName(typeName);
+            var component = new NativeApiComponent(host, this, typeDef, componentName);
+            _components.Add(component);
+            return component;
+        }
+
+        private void ReleaseUnmanagedResources(bool isDisposing)
+        {
+            try
+            {
+                foreach (var component in _components)
+                {
+                    component.Dispose();
+                }
+                
+                if (Loaded && NativeApiKernel.FreeLibrary(Module))
+                {
+                    if (!String.IsNullOrEmpty(_tempfile))
+                    {
+                        File.Delete(_tempfile);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                if (isDisposing)
+                    throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            ReleaseUnmanagedResources(true);
+            GC.SuppressFinalize(this);
+        }
+
+        ~NativeApiLibrary()
+        {
+            ReleaseUnmanagedResources(false);
+        }
+    }
+}

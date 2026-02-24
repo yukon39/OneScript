@@ -1,0 +1,76 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the 
+Mozilla Public License, v.2.0. If a copy of the MPL 
+was not distributed with this file, You can obtain one 
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System;
+using OneScript.Contexts;
+using OneScript.Types;
+using OneScript.Values;
+using ScriptEngine.Machine;
+using ScriptEngine.Machine.Contexts;
+
+namespace OneScript.StandardLibrary.TypeDescriptions
+{
+	[ContextClass("КвалификаторыДаты", "DateQualifiers")]
+	public sealed class DateQualifiers : AutoContext<DateQualifiers>, IValueAdjuster
+	{
+		public DateQualifiers(DateFractionsEnum dateFractions = DateFractionsEnum.DateTime)
+		{
+			DateFractions = dateFractions;
+		}
+
+		[ContextProperty("ЧастиДаты", "DateFractions")]
+		public DateFractionsEnum DateFractions { get; }
+
+		public override bool Equals(object obj)
+		{
+			if (!(obj is DateQualifiers asThis))
+				return false;
+
+			return DateFractions == asThis.DateFractions;
+		}
+
+		public override bool Equals(BslValue other)
+		{
+			return Equals((object)other);
+		}
+
+		public override int GetHashCode()
+		{
+			return DateFractions.GetHashCode();
+		}
+
+		public IValue Adjust(IValue value)
+		{
+			if (value == null || value.SystemType == BasicTypes.Undefined)
+				return ValueFactory.Create(new DateTime(1, 1, 1));
+
+			try
+			{
+				// TODO: вменяемое приведение без Попытки
+				var dateToAdjust = value.AsDate();
+
+				switch (DateFractions)
+				{
+					case DateFractionsEnum.Date: return ValueFactory.Create(dateToAdjust.Date);
+					case DateFractionsEnum.Time: return ValueFactory.Create(new DateTime(dateToAdjust.TimeOfDay.Ticks));
+					default: return ValueFactory.Create(dateToAdjust);
+				}
+			}
+			catch
+			{
+				return ValueFactory.Create(new DateTime(1, 1, 1));
+			}
+
+		}
+
+		[ScriptConstructor(Name = "На основании описания даты")]
+		public static DateQualifiers Constructor(DateFractionsEnum dateFractions = DateFractionsEnum.DateTime)
+		{
+			return new DateQualifiers(dateFractions);
+		}
+	}
+}

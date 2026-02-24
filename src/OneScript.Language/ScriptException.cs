@@ -1,0 +1,135 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the 
+Mozilla Public License, v.2.0. If a copy of the MPL 
+was not distributed with this file, You can obtain one 
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System;
+using System.Collections.Generic;
+using System.Text;
+using OneScript.Localization;
+
+namespace OneScript.Language
+{
+    public class ScriptException : ApplicationException
+    {
+        private readonly ErrorPositionInfo _codePosition;
+        
+        public ScriptException(string message, Exception innerException = null)
+            : this(new ErrorPositionInfo(), message, innerException)
+        {
+        }
+
+        protected ScriptException(ErrorPositionInfo errorInfo, string message, Exception innerException = null)
+            : base(message, innerException)
+        {
+            _codePosition = errorInfo ?? throw new ArgumentNullException(nameof(errorInfo));
+        }
+
+        public ScriptException(ErrorPositionInfo errorInfo, Exception innerException)
+            : base(innerException.Message, innerException)
+        {
+            _codePosition = errorInfo ?? throw new ArgumentNullException(nameof(errorInfo));
+        }
+        
+        public ScriptException(Exception innerException)
+            : base(innerException.Message, innerException)
+        {
+            _codePosition = new ErrorPositionInfo();
+        }
+        
+        public int LineNumber
+        {
+            get => _codePosition.LineNumber;
+            set => _codePosition.LineNumber = value;
+        }
+
+        public int ColumnNumber
+        {
+            get => _codePosition.ColumnNumber;
+            set => _codePosition.ColumnNumber = value;
+        }
+
+        public string Code
+        {
+            get => _codePosition.Code;
+            set => _codePosition.Code = value;
+        }
+
+        public string ModuleName
+        {
+            get => _codePosition.ModuleName;
+            set => _codePosition.ModuleName = value;
+        }
+
+        public ErrorPositionInfo GetPosition()
+        {
+            return _codePosition;
+        }
+
+        public string ErrorDescription => base.Message;
+
+        public string MessageWithoutCodeFragment
+        {
+            get
+            {
+                var parts = new List<string>();
+
+                if (!string.IsNullOrEmpty(ModuleName))
+                    parts.Add($"Модуль {ModuleName}");
+
+                if (LineNumber != ErrorPositionInfo.OUT_OF_TEXT)
+                {
+                    parts.Add(ColumnNumber != ErrorPositionInfo.OUT_OF_TEXT
+                        ? BilingualString.Localize($"Ошибка в строке: {LineNumber},{ColumnNumber}", $"Error in line {LineNumber},{ColumnNumber}")
+                        : BilingualString.Localize($"Ошибка в строке: {LineNumber}", $"Error in line: {LineNumber}"));
+                }
+                parts.Add(base.Message);
+
+                var unquotedResult = string.Join(" / ", parts);
+                return $"{{{unquotedResult}}}";
+            }
+        }
+
+        public override string Message
+        {
+            get
+            {
+                var sb = new StringBuilder(MessageWithoutCodeFragment);
+                sb.AppendLine();
+                var codeLine = Code?.Replace('\t', ' ')?.TrimEnd() ?? String.Empty;
+                if (ColumnNumber > codeLine.Length)
+                {
+                    ColumnNumber = codeLine.Length;
+                }
+
+                if (ColumnNumber != ErrorPositionInfo.OUT_OF_TEXT)
+                {
+                    sb.Append(codeLine[..ColumnNumber]);
+                    sb.Append("<<?>>");
+                    sb.AppendLine(codeLine[ColumnNumber..]);
+                }
+                else
+                {
+                    sb.AppendLine(codeLine);
+                }
+
+                return sb.ToString();
+            }
+        }
+
+        public object RuntimeSpecificInfo { get; set; }
+        
+        public void SetPositionIfEmpty(ErrorPositionInfo newPosition)
+        {
+            if (!_codePosition.IsEmpty) 
+                return;
+            
+            _codePosition.LineNumber = newPosition.LineNumber;
+            _codePosition.ColumnNumber = newPosition.ColumnNumber;
+            _codePosition.Code = newPosition.Code;
+            _codePosition.ModuleName = newPosition.ModuleName;
+        }
+    }
+}

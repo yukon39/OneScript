@@ -5,34 +5,79 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
-using System.Threading;
-
-using oscript.DebugServer;
-
-using ScriptEngine.Machine;
+using OneScript.DebugServices;
 
 namespace oscript
 {
-    internal class DebugBehavior : AppBehavior
+    internal class DebugBehavior : ExecuteScriptBehavior
     {
-        private readonly string[] _args;
-        private readonly string _path;
-        private readonly int _port;
-        
-        public DebugBehavior(int port, string path, string[] args)
+        public DebugBehavior(string path, string[] args) : base(path, args)
         {
-            _args = args;
-            _path = path;
-            _port = port;
         }
+
+        public int Port { get; set; } = 2801;
+        
+        public bool AttachMode { get; set; } = true;
 
         public override int Execute()
         {
-            var executor = new ExecuteScriptBehavior(_path, _args);
-            executor.DebugController = new WcfDebugController(_port);
-
-            return executor.Execute();
+            var tcpDebugServer = new TcpDebugServer(Port);
+            
+            DebugController = new DefaultDebugger(tcpDebugServer)
+            {
+                AttachMode = AttachMode
+            };
+            
+            return base.Execute();
         }
-        
+
+        public static AppBehavior Create(CmdLineHelper helper)
+        {
+            int port = 2801;
+            string path = null;
+            bool noWait = false;
+            
+            while (true)
+            {
+                var arg = helper.Next();
+                if (arg == null)
+                {
+                    break;
+                }
+
+                var parsedArg = helper.Parse(arg);
+                if (parsedArg.Name == "-port")
+                {
+                    var portString = parsedArg.Value;
+                    if (string.IsNullOrEmpty(portString)) 
+                        return null;
+                
+                    if (!Int32.TryParse(portString, out port))
+                    {
+                        Output.WriteLine("Incorrect port: " + portString);
+                        return null;
+                    }
+                }
+                else if (parsedArg.Name == "-noWait")
+                {
+                    noWait = true;
+                }
+                else if (parsedArg.Name == "-protocol")
+                {
+                    // Обратная совместимость, не используется в реальности
+                    continue;
+                }
+                else
+                {
+                    path = arg;
+                    break;
+                }
+            }
+
+            return path == null ? null : new DebugBehavior(path, helper.Tail())
+            {
+                Port = port, AttachMode = noWait
+            };
+        }
     }
 }

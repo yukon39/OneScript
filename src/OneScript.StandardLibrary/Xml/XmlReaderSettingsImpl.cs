@@ -1,0 +1,138 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the 
+Mozilla Public License, v.2.0. If a copy of the MPL 
+was not distributed with this file, You can obtain one 
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System.Xml;
+using OneScript.Contexts;
+using OneScript.Values;
+using ScriptEngine.Machine;
+using ScriptEngine.Machine.Contexts;
+
+namespace OneScript.StandardLibrary.Xml
+{
+    /// <summary>
+    /// Параметры, используемые для формирования XML
+    /// </summary>
+    [ContextClass("ПараметрыЧтенияXML", "XmlReaderSettings")]
+    public class XmlReaderSettingsImpl : AutoContext<XmlReaderSettingsImpl>
+    {
+        readonly XmlParserContext _context;
+        readonly XmlReaderSettings _settings;
+
+        public XmlReaderSettingsImpl(string version, XmlParserContext context, XmlReaderSettings settings,
+            bool ignoreXMLDeclaration=true,
+            bool ignoreDocumentType=true,
+            bool CDataSectionAsText=true, // умолчание отличается от конструктора скрипта
+            bool useIgnorableWhitespace=false)
+        {
+            Version = version;
+            _context = context;
+            _settings = settings;
+            IgnoreXMLDeclaration = ignoreXMLDeclaration;
+            IgnoreDocumentType = ignoreDocumentType;
+            CDATASectionAsText = CDataSectionAsText;
+            UseIgnorableWhitespace = useIgnorableWhitespace;
+        }
+
+        public XmlReaderSettings Settings => _settings;
+        public XmlParserContext Context => _context;
+
+        /// <summary>
+        /// Версия XML
+        /// </summary>
+        [ContextProperty("Версия", "Version")]
+        public string Version { get; }
+
+        /// <summary>
+        /// Язык
+        /// </summary>
+        [ContextProperty("Язык", "Language")]
+        public string Language => _context.XmlLang;
+
+        [ContextProperty("ПробельныеСимволы", "Space")]
+        public IValue Space => XmlSpaceEnum.FromNativeValue(_context.XmlSpace);
+
+        [ContextProperty("ТипПроверкиПравильности","ValidationType")]
+        public IValue ValidationTypeImpl => XmlValidationTypeEnum.FromNativeValue(_settings.ValidationType);
+
+        [ContextProperty("ИгнорироватьОбъявлениеXML", "IgnoreXMLDeclaration")]
+        public bool IgnoreXMLDeclaration { get; }
+
+        [ContextProperty("ИгнорироватьТипДокумента", "IgnoreDocumentType")]
+        public bool IgnoreDocumentType { get; }
+
+        [ContextProperty("ИгнорироватьИнструкцииОбработки", "IgnoreDataProcessorInstructions")]
+        public bool IgnoreDataProcessorInstructions => _settings.IgnoreProcessingInstructions;
+
+        [ContextProperty("ИгнорироватьКомментарии", "IgnoreComments")]
+        public bool IgnoreComments => _settings.IgnoreComments;
+
+        [ContextProperty("ИгнорироватьПробельныеСимволы", "IgnoreWhitespace")]
+        public bool IgnoreWhitespace => _settings.IgnoreWhitespace;
+
+        [ContextProperty("СекцииCDATAКакТекст", "CDATASectionAsText")]
+        public bool CDATASectionAsText { get; }
+
+        [ContextProperty("ИспользоватьИгнорируемыеПробельныеСимволы", "UseIgnorableWhitespace")]
+        public bool UseIgnorableWhitespace { get; }
+
+        [ScriptConstructor]
+        public static XmlReaderSettingsImpl Constructor(
+            string version = null,
+            string lang = null,
+            ClrEnumValueWrapper<XmlSpace> spaceChars = null, 
+            ClrEnumValueWrapper<ValidationType> validityCheckType = null,
+            bool ignoreXMLDeclaration = true,
+            bool ignoreDocumentType = true,
+            bool ignoreDataProcessorInstructions = false,
+            bool ignoreComments = false,
+            bool ignoreSpaceCharacters = true,
+            bool CDATASectionAsText = false,
+            bool useIgnorableWhitespace = false)
+        {
+            var context = new XmlParserContext(null, null,
+                lang ?? "",
+                ContextValuesMarshaller.ConvertWrappedEnum(spaceChars, XmlSpace.Default))
+                {
+                    Encoding = System.Text.Encoding.UTF8
+                };
+
+            var settings = new XmlReaderSettings
+            {
+                ValidationType = ContextValuesMarshaller.ConvertWrappedEnum(validityCheckType, ValidationType.None),
+                IgnoreComments = ignoreComments,
+                IgnoreProcessingInstructions = ignoreDataProcessorInstructions,
+                IgnoreWhitespace = ignoreSpaceCharacters,
+                DtdProcessing = ignoreDocumentType ? DtdProcessing.Ignore : DtdProcessing.Parse,
+            };
+
+            return new XmlReaderSettingsImpl(
+                version ?? "1.0",
+                context,
+                settings,
+                ignoreXMLDeclaration,
+                ignoreDocumentType,
+                CDATASectionAsText,
+                useIgnorableWhitespace);
+        }
+
+        public static XmlReaderSettingsImpl Create()
+        {
+            var context = new XmlParserContext(null, null,"",XmlSpace.Default);
+
+            var settings = new XmlReaderSettings
+            {
+                ValidationType = ValidationType.None,
+                IgnoreComments = true, // отличается от конструктора скрипта
+                IgnoreProcessingInstructions = false,
+                IgnoreWhitespace =  true,
+                DtdProcessing = DtdProcessing.Ignore,
+            };
+
+            return new XmlReaderSettingsImpl("1.0", context, settings);
+        }
+    }
+}

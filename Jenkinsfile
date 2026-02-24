@@ -4,91 +4,85 @@ pipeline {
     agent none
 
     environment {
-        ReleaseNumber = '1.1.0'
+        VersionPrefix = '2.0.1'
+        VersionSuffix = 'rc.2'+"+${BUILD_NUMBER}"
         outputEnc = '65001'
     }
 
     stages {
-        stage('Windows Build') {
-            agent { label 'windows' }
+        stage('Build'){
+            parallel {
+                stage('Windows Build') {
+                    agent { label 'windows' }
 
-            // пути к инструментам доступны только когда
-            // нода уже определена
-            environment {
-                NugetPath = "${tool 'nuget'}"
-                OneScriptDocumenter = "${tool 'documenter'}"
-                StandardLibraryPacks = "${tool 'os_stdlib'}"
-            }
+                    options { skipDefaultCheckout() }
 
-            steps {
-                
-                // в среде Multibranch Pipeline Jenkins первращает имена веток в папки
-                // а для веток Gitflow вида release/* экранирует в слэш в %2F
-                // При этом MSBuild, видя urlEncoding, разэкранирует его обратно, ломая путь (появляется слэш, где не надо)
-                //
-                // Поэтому, применяем костыль с кастомным workspace
-                // см. https://issues.jenkins-ci.org/browse/JENKINS-34564
-                //
-                // А еще Jenkins под Windows постоянно добавляет в конец папки какую-то мусорную строку.
-                // Для этого отсекаем все, что находится после последнего дефиса
-                // см. https://issues.jenkins-ci.org/browse/JENKINS-40072
-                
-                ws(env.WORKSPACE.replaceAll("%", "_").replaceAll(/(-[^-]+$)/, ""))
-                {
-                    step([$class: 'WsCleanup'])
-					checkout scm
-
-                    bat 'set'
-                    withSonarQubeEnv('silverbulleters') {
-                        script {
-                            def sqScannerMsBuildHome = tool 'sonar-scanner for msbuild';
-                            sqScannerMsBuildHome = sqScannerMsBuildHome + "\\SonarScanner.MSBuild.exe";
-                            def sonarcommandStart = "@" + sqScannerMsBuildHome + " begin /k:1script /n:OneScript /v:\"${env.ReleaseNumber}\" /d:sonar.verbose=true /d:sonar.exclusions=src/ASPNETHandler/**/*,tests/**/*";
-                            def makeAnalyzis = false
-                            if (env.BRANCH_NAME == "develop") {
-                                echo 'Analysing develop branch'
-                            } else if (env.BRANCH_NAME.startsWith("PR-")) {
-                                // Report PR issues           
-                                def PRNumber = env.BRANCH_NAME.tokenize("PR-")[0]
-                                def gitURLcommand = 'git config --local remote.origin.url'
-                                def gitURL = ""
-                                
-                                if (isUnix()) {
-                                    gitURL = sh(returnStdout: true, script: gitURLcommand).trim() 
-                                } else {
-                                    gitURL = bat(returnStdout: true, script: gitURLcommand).trim() 
-                                }
-                                
-                                def repository = gitURL.tokenize("/")[2] + "/" + gitURL.tokenize("/")[3]
-                                repository = repository.tokenize(".")[0]
-                                withCredentials([string(credentialsId: 'GithubOAUTHToken_ForSonar', variable: 'githubOAuth')]) {
-                                    sonarcommandStart = sonarcommandStart + " /d:sonar.analysis.mode=issues /d:sonar.github.pullRequest=${PRNumber} /d:sonar.github.repository=${repository} /d:sonar.github.oauth=${githubOAuth}"
-                                }
-                            } else {
-                                makeAnalyzis = false
-                            }
-
-                            if (makeAnalyzis) {
-                                bat "${sonarcommandStart}"
-                            }
-                            bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" src/1Script.sln /t:restore"
-							bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:CleanAll;PrepareDistributionContent"
-                            if (makeAnalyzis) {
-                                bat "${sqScannerMsBuildHome} end"
-                            }
-                        }
+                    // пути к инструментам доступны только когда
+                    // нода уже определена
+                    environment {
+                        NugetPath = "${tool 'nuget'}"
+                        StandardLibraryPacks = "${tool 'os_stdlib'}"
                     }
 
-                    stash includes: 'tests, built/**', name: 'buildResults'
+                    steps {
+                        
+                        // в среде Multibranch Pipeline Jenkins первращает имена веток в папки
+                        // а для веток Gitflow вида release/* экранирует в слэш в %2F
+                        // При этом MSBuild, видя urlEncoding, разэкранирует его обратно, ломая путь (появляется слэш, где не надо)
+                        //
+                        // Поэтому, применяем костыль с кастомным workspace
+                        // см. https://issues.jenkins-ci.org/browse/JENKINS-34564
+                        //
+                        // А еще Jenkins под Windows постоянно добавляет в конец папки какую-то мусорную строку.
+                        // Для этого отсекаем все, что находится после последнего дефиса
+                        // см. https://issues.jenkins-ci.org/browse/JENKINS-40072
+                        
+                        ws(env.WORKSPACE.replaceAll("%", "_").replaceAll(/(-[^-]+$)/, ""))
+                        {
+                            step([$class: 'WsCleanup'])
+                            checkout scm
+
+                            bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" src/1Script.sln /t:restore && mkdir doctool"
+                            bat "chcp $outputEnc > nul\r\n dotnet publish src/OneScriptDocumenter/OneScriptDocumenter.csproj -c Release -o doctool"
+                            bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:CleanAll;PrepareDistributionFiles;CreateNuget"
+                            
+                            stash includes: 'built/**', name: 'buildResults'
+                            stash includes: 'tests/native-api/bin*/*.dll', name: 'nativeApiTestsDll'
+                        }
+                    }
                 }
-           }
-
+                
+                stage('Linux Build') {
+                    agent {
+                        docker {
+                            image 'oscript/onescript-builder:gcc'
+                            label 'linux'
+                        }
+                    }
+                    
+                    steps {
+                        sh 'mkdir -p built/tmp/na-proxy && mkdir -p built/tmp/na-tests'
+                        dir('src/ScriptEngine.NativeApi') {
+                            sh './build.sh'
+                            sh 'cp *.so ../../built/tmp/na-proxy'
+                        }
+                        dir('tests/native-api') {
+                            sh './build.sh'
+                            sh 'cp *.so ../../built/tmp/na-tests'
+                        }
+                        dir('output') {
+                            sh 'cp -Rv ../built/tmp/* .'
+                        }
+                        stash includes: 'output/na-proxy/*.so', name: 'nativeApiSo'
+                        stash includes: 'output/na-tests/*.so', name: 'nativeApiTestsSo'
+                    }
+                }
+            }
         }
-
         stage('VSCode debugger Build') {
             agent {
                 docker {
-                    image 'node'
+                    image 'node:lts-alpine3.20'
                     label 'linux'
                 }
             }
@@ -105,181 +99,299 @@ pipeline {
             }
         }
 
-        stage('Windows testing') {
-            agent { label 'windows' }
-
-            steps {
-                ws(env.WORKSPACE.replaceAll("%", "_").replaceAll(/(-[^-]+$)/, ""))
-                {
-                    dir('install/build'){
-                        deleteDir()
+        stage('Testing'){
+            parallel{
+                stage('Windows testing') {
+                    agent { label 'windows' }
+                    options { skipDefaultCheckout() }
+                    environment {
+                        OSCRIPT_CONFIG = 'systemlanguage=ru'
                     }
-                    unstash 'buildResults'
-                    bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:xUnitTest"
+                    steps {
+                        ws(env.WORKSPACE.replaceAll("%", "_").replaceAll(/(-[^-]+$)/, ""))
+                        {
+                            step([$class: 'WsCleanup'])
+                            checkout scm
+                            
+                            dir('install/build'){
+                                deleteDir()
+                            }
+                            unstash 'buildResults'
+                            unstash 'nativeApiTestsDll'
+                            bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:Test"
 
-                    junit 'tests/tests.xml'
+                            junit 'tests/*.xml'
+                        }
+                    }
+                }
+
+                stage('Linux testing') {
+                    agent{ 
+                        docker {
+                            image 'mcr.microsoft.com/dotnet/sdk:6.0'
+                            label 'linux' 
+                        }
+                    }
+                    environment {
+                        OSCRIPT_CONFIG = 'systemlanguage=ru'
+                    }
+
+                    steps {
+                        
+                        dir('built'){
+                            deleteDir()
+                        }
+                        
+                        unstash 'buildResults'
+                        unstash 'nativeApiSo'
+                        unstash 'nativeApiTestsSo'
+                        
+                        sh 'cp output/na-proxy/*.so ./built/linux-x64/bin/'
+                        sh 'mkdir -p tests/native-api/build64 && cp output/na-tests/*.so ./tests/native-api/build64/'
+
+                        sh '''\
+                        if [ ! -d lintests ]; then
+                            mkdir lintests
+                        fi
+                        rm lintests/*.xml -f
+                        cd tests
+                        dotnet ../built/linux-x64/bin/oscript.dll testrunner.os -runall . xddReportPath ../lintests || true
+                        exit 0
+                        '''.stripIndent()
+
+                        junit 'lintests/*.xml'
+                        archiveArtifacts artifacts: 'lintests/*.xml', fingerprint: true
+                    }
                 }
             }
-        }
-
-        stage('Linux testing') {
-
-            agent { label 'master' }
-
-            steps {
-                
-                dir('install/build'){
-                    deleteDir()
-                }
-                
-                unstash 'buildResults'
-
-                sh '''\
-                if [ ! -d lintests ]; then
-                    mkdir lintests
-                fi
-
-                rm lintests/*.xml -f
-                cd tests
-                mono ../built/tmp/bin/oscript.exe testrunner.os -runall . xddReportPath ../lintests || true
-                exit 0
-                '''.stripIndent()
-
-                junit 'lintests/*.xml'
-                archiveArtifacts artifacts: 'lintests/*.xml', fingerprint: true
-            }
-
-
-
         }
         
         stage('Packaging') {
             agent { label 'windows' }
 
-            environment {
-                InnoSetupPath = "${tool 'InnoSetup'}"
-            }
-            
+            options { skipDefaultCheckout() }
+
             steps {
                 ws(env.WORKSPACE.replaceAll("%", "_").replaceAll(/(-[^-]+$)/, ""))
                 {
+                    step([$class: 'WsCleanup'])
+                    checkout scm
+                    
                     dir('built'){
                         deleteDir()
                     }
                     
                     unstash 'buildResults'
-                    script
-                    {
-                        if (env.BRANCH_NAME == "preview") {
-                            echo 'Building preview'
-                            bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:CreateDistributions /p:Suffix=-pre%BUILD_NUMBER%"
-                        }
-                        else{
-                            bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:CreateDistributions"
-                        }
-                    }
+                    unstash 'nativeApiSo'
+                    
+                    bat '''
+                    chcp 65001 > nul
+                    dir output\\na-proxy
+                    xcopy output\\na-proxy\\*64.so built\\linux-x64\\bin\\ /F
+                    '''.stripIndent()
+                    
+                    bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:PackDistributions"
+                    
                     archiveArtifacts artifacts: 'built/**', fingerprint: true
-                    stash includes: 'built/**', name: 'winDist'
+                    stash includes: 'built/**', name: 'dist'
                 }
             }
-        }
-
-        stage ('Packaging DEB and RPM') {
-            agent { label 'master' }
-
-            steps {
-
-                dir('built'){
-                    deleteDir()
-                }
-                checkout scm
-                unstash 'buildResults'
-
-                sh '''
-                cd install
-                chmod +x prepare-build.sh
-                chmod +x deb-build.sh
-                chmod +x rpm-build.sh
-
-                sh ./prepare-build.sh
-                
-                DISTPATH=`pwd`/built/tmp
-                
-                sh ./deb-build.sh $DISTPATH
-                sh ./rpm-build.sh $DISTPATH
-                '''.stripIndent()
-                
-                archiveArtifacts artifacts: 'output/*', fingerprint: true
-                stash includes: 'output/*', name: 'linDist'
-                
-            }
-
         }
 
         stage ('Publishing night-build') {
-            when { anyOf {
-				branch 'develop';
-				branch 'release/*'
-				}
-			}
-			
-            agent { label 'master' }
-
-            steps {
-                
-                unstash 'winDist'
-                unstash 'linDist'
-                unstash 'vsix'
-                
-                sh '''
-                if [ -d "targetContent" ]; then
-                    rm -rf targetContent
-                fi
-                mkdir targetContent
-                mv -t targetContent built/*.exe built/*.zip built/vscode/*.vsix
-                mv output/*.rpm targetContent/
-                mv output/*.deb targetContent/
-
-                TARGET="/var/www/oscript.io/download/versions/night-build/"
-
-                cd targetContent
-                sudo rsync -rv --delete --exclude mddoc*.zip --exclude *.src.rpm . $TARGET
-                rm -rf targetContent
-                '''.stripIndent()
+            when { 
+                anyOf {
+                    branch 'develop';
+                }
             }
-        }
-                
-        stage ('Publishing master') {
-            when { branch 'master' }
-                
             agent { label 'master' }
+            options { skipDefaultCheckout() }
 
             steps {
+                cleanWs()
                 
-                unstash 'winDist'
-                unstash 'linDist'
+                unstash 'dist'
                 unstash 'vsix'
-                
-                sh """
-                if [ -d "targetContent" ]; then
-                    rm -rf targetContent
-                fi
-                mkdir targetContent
-                mv -t targetContent built/*.exe built/*.zip built/vscode/*.vsix
-                mv output/*.rpm targetContent/
-                mv output/*.deb targetContent/
 
-                cd targetContent
-                TARGET="/var/www/oscript.io/download/versions/latest/"
-                sudo rsync -rv --delete --exclude mddoc*.zip --exclude *.src.rpm . \$TARGET
-                
-                TARGET="/var/www/oscript.io/download/versions/$ReleaseNumber/"
-                sudo rsync -rv --delete --exclude mddoc*.zip --exclude *.src.rpm . \$TARGET
-
-                """.stripIndent()
+                publishRelease('night-build', false)
             }
         }
 
+        stage ('Publishing preview') {
+            when { 
+                anyOf {
+                    branch 'release/preview';
+                }
+            }
+            agent { label 'master' }
+            options { skipDefaultCheckout() }
+            
+            steps {
+                cleanWs()
+                checkout scm // чтобы получить файл release-notes
+                unstash 'dist'
+                unstash 'vsix'
+                
+                // Положит описание для сайта
+                publishReleaseNotes('preview')
+                
+                // Положит файлы дистрибутива в целевую папку
+                publishRelease('preview', true)
+            }
+        }
+        
+        stage ('Publishing latest') {
+            when { 
+                anyOf {
+                    branch 'release/latest';
+                }
+            }
+            agent { label 'master' }
+            options { skipDefaultCheckout() }
+            
+            steps {
+                cleanWs()
+                checkout scm // чтобы получить файл release-notes
+                unstash 'dist'
+                unstash 'vsix'
+                
+                // Положит описание для сайта
+                publishReleaseNotes('latest')
+                
+                // Положит файлы дистрибутива в целевую папку
+                publishRelease('latest', true)
+            }
+        }
+        
+        stage ('Publishing artifacts to clouds') {
+            when {
+                anyOf { 
+                    branch 'release/latest';
+                    branch 'release/preview';
+                } 
+            }
+
+            agent { label 'windows' }
+
+            steps{
+
+                unstash 'buildResults'
+
+                withCredentials([string(credentialsId: 'NuGetToken', variable: 'NUGET_TOKEN')]) {
+                    bat "chcp $outputEnc > nul\r\n\"${tool 'MSBuild'}\" Build.csproj /t:PublishNuget /p:NugetToken=$NUGET_TOKEN"
+                }
+            }
+        }
+
+        stage ('Publishing docker-images') {
+            parallel {
+                stage('Build v1') {
+                    agent { label 'linux' }
+                    when { 
+                        anyOf {
+                            branch 'release/lts'
+                            expression { 
+                                return env.TAG_NAME && env.TAG_NAME.startsWith('v1.')
+                            }
+                        }
+                    }
+                    steps {
+                        script {
+                            def codename = env.TAG_NAME ? env.TAG_NAME : 'lts'
+                            publishDockerImage('v1', codename)
+                        }
+                    }
+                }
+
+                stage('Build v2') {
+                    agent { label 'linux' }
+                    when { 
+                        anyOf {
+                            branch 'develop'
+                            branch 'release/latest'
+                        }
+                    }
+                    steps {
+                        script {
+                            def codename = ''
+                            if (env.VersionSuffix != null && !env.VersionSuffix.isEmpty()) {
+                                codename = 'dev'
+                            }
+                            else
+                            {
+                                codename = fullVersionNumber()
+                            }
+                            
+                            publishDockerImage('v2', codename)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+def fullVersionNumber() {
+    def version = env.VersionPrefix
+    if (env.VersionSuffix != null && !env.VersionSuffix.isEmpty())
+    {
+        version = version + "-${env.VersionSuffix}"
     }
     
+    return version
 }
+
+def underscoredVersion() {
+    return fullVersionNumber().replaceAll("\\.", "_")
+}
+
+def publishRelease(codename, isNumbered) {
+    dir('targetContent') {
+        sh """
+        ZIPS=../built
+        NUGET=../built/nuget
+        VSIX=../built/vscode
+        mv \$ZIPS/*.zip ./
+        mv \$VSIX/*.vsix ./
+        
+        TARGET="/var/www/oscript.io/download/versions/${codename}/"
+        mkdir -p \$TARGET
+        sudo rsync -rv --delete --exclude mddoc*.zip --exclude *.src.rpm . \$TARGET
+        """.stripIndent()
+        
+        if (isNumbered) {
+        
+            def version = underscoredVersion()
+            
+            sh """
+            TARGET="/var/www/oscript.io/download/versions/${version}/"
+            sudo mkdir -p \$TARGET
+            sudo rsync -rv --delete --exclude mddoc*.zip --exclude *.src.rpm . \$TARGET
+            """.stripIndent()
+        }
+    }
+}
+
+def publishReleaseNotes(codename) {
+    dir('markdownContent') {
+        def version=underscoredVersion()
+        def targetDir='/var/www/oscript.io/markdown/versions'
+        
+        sh """
+        cp ../install/release-notes.md "./${codename}.md"
+        cp ../install/release-notes.md "./${version}.md"
+        
+        sudo rsync -rv . ${targetDir}
+        """.stripIndent()        
+    }
+}
+
+def publishDockerImage(flavour, codename) {
+    def imageName = "evilbeaver/onescript:${codename}"
+
+    docker.build(
+        imageName,
+        "--load -f install/builders/base-image/Dockerfile_${flavour} ."
+    ).push()
+}
+

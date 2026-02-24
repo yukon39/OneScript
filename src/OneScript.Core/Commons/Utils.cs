@@ -1,0 +1,55 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the 
+Mozilla Public License, v.2.0. If a copy of the MPL 
+was not distributed with this file, You can obtain one 
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+using System;
+using System.Collections.Generic;
+
+namespace OneScript.Commons
+{
+    public static class Utils
+    {
+        public static bool IsValidIdentifier(string name)
+        {
+            if (name == null || name.Length == 0)
+                return false;
+
+            if (!(Char.IsLetter(name[0]) || name[0] == '_'))
+                return false;
+
+            for (int i = 1; i < name.Length; i++)
+            {
+                if (!(Char.IsLetterOrDigit(name[i]) || name[i] == '_'))
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static void ForEach<T>(this IEnumerable<T> input, Action<T> action)
+        {
+            foreach (var data in input)
+            {
+                action(data);
+            }
+        }
+        public static string NameAndValuePresentation(string name, object value)
+        {
+            var list = new List<string>();
+            if (!string.IsNullOrEmpty(name))
+            {
+                list.Add(name);
+            }
+            if (value != null)
+            {
+                list.Add(value.ToString());
+            }
+            return string.Join("=", list);
+        }
+
+        public static bool IsMonoRuntime => Type.GetType("Mono.Runtime") != null;
+
+    }
+}

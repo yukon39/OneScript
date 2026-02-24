@@ -6,8 +6,12 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Language;
+using OneScript.Localization;
 
 namespace ScriptEngine.Machine.Contexts
 {
@@ -17,22 +21,46 @@ namespace ScriptEngine.Machine.Contexts
     [ContextClass("ИнформацияОбОшибке", "ErrorInfo")]
     public class ExceptionInfoContext : AutoContext<ExceptionInfoContext>
     {
-        readonly ScriptException _exc;
-        IValue _innerException;
+        private ScriptException _exc;
+        private IValue _innerException;
 
         public ExceptionInfoContext(ScriptException source)
         {
-            if (source == null)
-                throw new ArgumentNullException();
-            
-            _exc = source;
+            SetActualException(source);
         }
 
-        public ExceptionInfoContext(ParametrizedRuntimeException source):this((ScriptException)source)
+        private ExceptionInfoContext(string message, IValue parameters, ExceptionInfoContext cause)
         {
-            Parameters = source.Parameter;
+            Description = message;
+            Parameters = parameters;
+            _innerException = cause;
         }
 
+        public bool IsErrorTemplate => _exc == null;
+
+        private void SetActualException(ScriptException exception)
+        {
+            _exc = exception ?? throw new ArgumentNullException();
+            Description = _exc.ErrorDescription;
+            if (exception is ParametrizedRuntimeException pre)
+            {
+                Parameters = pre.Parameter;
+                _innerException = pre.Cause;
+            }
+        }
+
+        public ScriptException ActualException()
+        {
+            if (IsErrorTemplate)
+            {
+                throw new RuntimeException(BilingualString.Localize(
+                    "Эта ИнформацияОбОшибке еще не была выброшена оператором ВызватьИсключение",
+                    "This ErrorInfo is not have been thrown by Raise operator yet"));
+            }
+
+            return _exc;
+        }
+        
         /// <summary>
         /// Значение, переданное при создании исключения в конструкторе объекта ИнформацияОбОшибке.
         /// </summary>
@@ -47,56 +75,43 @@ namespace ScriptEngine.Machine.Contexts
         /// Содержит краткое описание ошибки. Эквивалент Exception.Message в C#
         /// </summary>
         [ContextProperty("Описание", "Description")]
-        public string Description 
-        { 
-            get { return _exc.ErrorDescription; } 
-        }
+        public string Description { get; private set;  }
 
-        public string MessageWithoutCodeFragment
-        {
-            get { return _exc.MessageWithoutCodeFragment; }
-        }
+        public string MessageWithoutCodeFragment => ActualException().MessageWithoutCodeFragment;
 
-        public string DetailedDescription
+        public string GetDetailedDescription()
         {
-            get { return _exc.Message; }
+            var exc = ActualException();
+            var sb = new StringBuilder(exc.Message);
+            var inner = exc.InnerException;
+            while (inner != default)
+            {
+                sb.AppendLine();
+                sb.AppendLine(Locale.NStr("ru = 'по причине:';en = 'caused by:'"));
+                sb.AppendLine(inner.Message);
+                inner = inner.InnerException;
+            }
+
+            return sb.ToString();
         }
 
         /// <summary>
         /// Имя модуля, вызвавшего исключение.
         /// </summary>
         [ContextProperty("ИмяМодуля", "ModuleName")]
-        public string ModuleName
-        {
-            get
-            {
-                return SafeMarshallingNullString(_exc.ModuleName);
-            }
-        }
+        public string ModuleName => ActualException().ModuleName ?? string.Empty;
 
         /// <summary>
         /// Номер строки, вызвавшей исключение.
         /// </summary>
         [ContextProperty("НомерСтроки", "LineNumber")]
-        public int LineNumber
-        {
-            get
-            {
-                return _exc.LineNumber;
-            }
-        }
+        public int LineNumber => ActualException().LineNumber;
 
         /// <summary>
         /// Строка исходного кода, вызвавшего исключение.
         /// </summary>
         [ContextProperty("ИсходнаяСтрока", "SourceLine")]
-        public string SourceLine
-        {
-            get
-            {
-                return SafeMarshallingNullString(_exc.Code);
-            }
-        }
+        public string SourceLine => ActualException().Code ?? string.Empty;
 
         /// <summary>
         /// Предоставляет доступ к стеку вызовов процедур.
@@ -106,21 +121,11 @@ namespace ScriptEngine.Machine.Contexts
         [ContextMethod("ПолучитьСтекВызовов", "GetStackTrace")]
         public IValue GetStackTrace()
         {
-            if (_exc is RuntimeException rte)
+            if (ActualException().RuntimeSpecificInfo is IList<ExecutionFrameInfo> frames)
             {
-                var frames = rte.CallStackFrames;
-                if (frames == null)
-                    return ValueFactory.Create();
-
                 return new StackTraceCollectionContext(frames);
             }
-            else
-                return ValueFactory.Create();
-        }
-
-        private string SafeMarshallingNullString(string src)
-        {
-            return src == null ? "" : src;
+            return ValueFactory.Create();
         }
 
         /// <summary>
@@ -140,31 +145,25 @@ namespace ScriptEngine.Machine.Contexts
 
         private IValue CreateInnerExceptionInfo()
         {
-            if (_exc.InnerException == null)
+            var exc = _exc;
+            if (exc?.InnerException == null)
                 return ValueFactory.Create();
 
-            bool alreadyWrapped = _exc is ExternalSystemException;
+            var alreadyWrapped = ActualException() is ExternalSystemException;
             if (!alreadyWrapped)
             {
-                ScriptException inner;
-                inner = _exc.InnerException as ScriptException;
-                if (inner == null)
-                {
-                    inner = new ExternalSystemException(_exc.InnerException);
-                }
-                if (inner.ModuleName == null)
-                    inner.ModuleName = _exc.ModuleName;
-                if (inner.Code == null)
-                    inner.Code = _exc.Code;
+                var inner = exc.InnerException as ScriptException ?? new ExternalSystemException(exc.InnerException);
+                inner.ModuleName ??= exc.ModuleName;
+                inner.Code ??= exc.Code;
                 return new ExceptionInfoContext(inner);
             }
             else
             {
-                if (_exc.InnerException.InnerException == null)
+                if (exc.InnerException.InnerException == null)
                     return ValueFactory.Create();
 
-                var inner = new ExternalSystemException(_exc.InnerException.InnerException);
-                if (inner.LineNumber == 0)
+                var inner = new ExternalSystemException(exc.InnerException.InnerException);
+                if (inner.LineNumber == ErrorPositionInfo.OUT_OF_TEXT)
                 {
                     inner.ModuleName = this.ModuleName;
                     inner.Code = this.SourceLine;
@@ -184,7 +183,7 @@ namespace ScriptEngine.Machine.Contexts
         [ContextMethod("ПодробноеОписаниеОшибки", "DetailedDescription")]
         public string GetDescription()
         {
-            return _exc.ToString();
+            return ActualException().ToString();
         }
 
         public override string ToString()
@@ -192,12 +191,36 @@ namespace ScriptEngine.Machine.Contexts
             return Description;
         }
 
-
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="msg">Строка - Сообщение об ошибке</param>
+        /// <param name="parameter">Произвольный - Дополнительная информация</param>
+        /// <param name="cause">ИнформацияОбОшибке - Причина, по которой произошло текущее исключение</param>
+        /// <returns></returns>
         [ScriptConstructor(Name = "С возможностью передачи параметров")]
-        public static ExceptionTemplate Create(IValue msg, IValue parameter)
+        public static ExceptionInfoContext Create(string msg, IValue parameter, ExceptionInfoContext cause = null)
         {
-            return new ExceptionTemplate(msg.AsString(), parameter);
+            return new ExceptionInfoContext(msg, parameter, cause);
         }
 
+        public static ExceptionInfoContext EmptyExceptionInfo()
+        {
+            return new ExceptionInfoContext(EmptyScriptException.Instance);
+        }
+        
+        private class EmptyScriptException : ScriptException
+        {
+            public static readonly EmptyScriptException Instance = new EmptyScriptException();
+            private EmptyScriptException() : base("")
+            {
+                LineNumber = 0;
+                ColumnNumber = 0;
+            }
+
+            public override string Message => "";
+
+            public override string ToString() => "";
+        }
     }
 }

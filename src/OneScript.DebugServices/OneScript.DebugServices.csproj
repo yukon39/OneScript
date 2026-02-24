@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+    <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
+    
+    <PropertyGroup>
+        <TargetFramework>$(TargetFrameworkVersion)</TargetFramework>
+        <Title>Debug services for apps hosting 1script engine</Title>
+        <Copyright>Copyright (c) 2020 EvilBeaver</Copyright>
+        <Configurations>Debug;Release;LinuxDebug</Configurations>
+        <Platforms>AnyCPU</Platforms>
+    </PropertyGroup>
+    
+    <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+      <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+      <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\OneScript.DebugProtocol\OneScript.DebugProtocol.csproj" />
+      <ProjectReference Include="..\ScriptEngine\ScriptEngine.csproj" />
+    </ItemGroup>
+
+</Project>

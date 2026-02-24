@@ -5,8 +5,7 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
-using System;
-
+using OneScript.Contexts;
 using ScriptEngine.Machine;
 using ScriptEngine.Machine.Contexts;
 
@@ -31,10 +30,10 @@ namespace Component
 		}
 
 		[ScriptConstructor]
-		public static SimpleClass Constructor(IValue initialProperty)
+		public static SimpleClass Constructor(int initialProperty)
 		{
 			var result = new SimpleClass();
-			result.IntProperty = ContextValuesMarshaller.ConvertParam<int>(initialProperty);
+			result.IntProperty = initialProperty;
 			return result;
 		}
 	}

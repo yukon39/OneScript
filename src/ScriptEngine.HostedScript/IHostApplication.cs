@@ -5,7 +5,7 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
-using ScriptEngine.HostedScript.Library;
+using OneScript.StandardLibrary;
 
 namespace ScriptEngine.HostedScript
 {
@@ -13,7 +13,7 @@ namespace ScriptEngine.HostedScript
     {
 		void Echo(string str, MessageStatusEnum status = MessageStatusEnum.Ordinary);
         void ShowExceptionInfo(Exception exc);
-        bool InputString(out string result, int maxLen);
+        bool InputString(out string result, string prompt, int maxLen, bool multiline);
         string[] GetCommandLineArguments();
     }
 }

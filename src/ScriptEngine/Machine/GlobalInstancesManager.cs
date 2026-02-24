@@ -4,40 +4,58 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
+
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 
 namespace ScriptEngine.Machine
 {
-    public static class GlobalsManager
+    public class GlobalInstancesManager : IGlobalsManager
     {
-        static readonly Dictionary<Type, object> _instances = new Dictionary<Type, object>();
+        private readonly Dictionary<Type, object> _instances = new Dictionary<Type, object>();
 
-        internal static void Reset()
+        public void Dispose()
         {
+            foreach (var disposable in _instances
+                .Select(x=>x.Value)                   
+                .Where(x => x is IDisposable))
+            {
+                ((IDisposable)disposable).Dispose();
+            }
+            
             _instances.Clear();
         }
 
-        internal static void RegisterInstance(object instance)
+        public void RegisterInstance(object instance)
         {
             _instances.Add(instance.GetType(), instance);
         }
 
-        public static T GetGlobalContext<T>()
+        public void RegisterInstance(Type type, object instance)
         {
-            return InternalGetInstance<T>();
+            _instances.Add(type, instance);
         }
 
-        public static T GetEnum<T>()
+        public object GetInstance(Type type)
         {
-            return InternalGetInstance<T>();
+            return _instances[type];
         }
 
-        private static T InternalGetInstance<T>()
+        public T GetInstance<T>()
         {
             return (T)_instances[typeof(T)];
+        }
+
+        public IEnumerator<KeyValuePair<Type, object>> GetEnumerator()
+        {
+            return _instances.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
         }
     }
 }

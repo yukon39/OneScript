@@ -5,26 +5,17 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Contexts;
+using OneScript.Execution;
+using OneScript.Values;
 
 namespace ScriptEngine.Machine.Contexts
 {
-    abstract public class GlobalContextBase<T> : IRuntimeContextInstance, IAttachableContext where T : GlobalContextBase<T>
+    public abstract class GlobalContextBase<T> : BslObjectValue, IAttachableContext where T : GlobalContextBase<T>
     {
-        private readonly ContextMethodsMapper<T> _methods = new ContextMethodsMapper<T>();
-        private readonly ContextPropertyMapper<T> _properties = new ContextPropertyMapper<T>();
+        protected ContextMethodsMapper<T> Methods { get; } = new ContextMethodsMapper<T>();
 
-        protected ContextMethodsMapper<T> Methods
-        {
-            get { return _methods; }
-        }
-
-        protected ContextPropertyMapper<T> Properties
-        {
-            get { return _properties; }
-        }
+        protected ContextPropertyMapper<T> Properties { get; } = new ContextPropertyMapper<T>();
 
         #region IRuntimeContextInstance members
 
@@ -33,10 +24,7 @@ namespace ScriptEngine.Machine.Contexts
             get { return false; }
         }
 
-        public bool DynamicMethodSignatures
-        {
-            get { return false; }
-        }
+        public bool DynamicMethodSignatures => false;
 
         public IValue GetIndexedValue(IValue index)
         {
@@ -48,26 +36,26 @@ namespace ScriptEngine.Machine.Contexts
             throw new NotImplementedException();
         }
 
-        public virtual int FindProperty(string name)
+        public virtual int GetPropertyNumber(string name)
         {
-            return _properties.FindProperty(name);
+            return Properties.FindProperty(name);
         }
 
         public virtual bool IsPropReadable(int propNum)
         {
-            return _properties.GetProperty(propNum).CanRead;
+            return Properties.GetProperty(propNum).CanRead;
         }
 
         public virtual bool IsPropWritable(int propNum)
         {
-            return _properties.GetProperty(propNum).CanWrite;
+            return Properties.GetProperty(propNum).CanWrite;
         }
 
         public virtual IValue GetPropValue(int propNum)
         {
             try
             {
-                return _properties.GetProperty(propNum).Getter((T)this);
+                return Properties.GetProperty(propNum).Getter((T)this);
             }
             catch (System.Reflection.TargetInvocationException e)
             {
@@ -79,7 +67,7 @@ namespace ScriptEngine.Machine.Contexts
         {
             try
             {
-                _properties.GetProperty(propNum).Setter((T)this, newVal);
+                Properties.GetProperty(propNum).Setter((T)this, newVal);
             }
             catch (System.Reflection.TargetInvocationException e)
             {
@@ -98,39 +86,62 @@ namespace ScriptEngine.Machine.Contexts
             return prop.Name;
         }
 
-        public virtual int FindMethod(string name)
+        public virtual int GetMethodNumber(string name)
         {
-            return _methods.FindMethod(name);
+            return Methods.FindMethod(name);
         }
 
-        public virtual MethodInfo GetMethodInfo(int methodNumber)
+        public virtual BslMethodInfo GetMethodInfo(int methodNumber)
         {
-            return _methods.GetMethodInfo(methodNumber);
+            return Methods.GetRuntimeMethod(methodNumber);
         }
 
-        public virtual void CallAsProcedure(int methodNumber, IValue[] arguments)
+        public virtual BslPropertyInfo GetPropertyInfo(int propertyNumber)
         {
-            _methods.GetMethod(methodNumber)((T)this, arguments);
+            return Properties.GetProperty(propertyNumber).PropertyInfo;
         }
 
-        public virtual void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue)
+        public virtual void CallAsProcedure(int methodNumber, IValue[] arguments, IBslProcess process)
         {
-            retValue = _methods.GetMethod(methodNumber)((T)this, arguments);
+            Methods.GetCallableDelegate(methodNumber)((T)this, arguments, process);
+        }
+
+        public virtual void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue, IBslProcess process)
+        {
+            retValue = Methods.GetCallableDelegate(methodNumber)((T)this, arguments, process);
+        }
+
+        public void CallAsProcedure(int methodNumber, IValue[] arguments)
+        {
+            CallAsProcedure(methodNumber, arguments, ForbiddenBslProcess.Instance);
+        }
+
+        public void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue)
+        {
+            CallAsFunction(methodNumber, arguments, out retValue, ForbiddenBslProcess.Instance);
         }
 
         #endregion
 
         #region IAttachableContext members
 
-        public virtual void OnAttach(MachineInstance machine, out IVariable[] variables, out MethodInfo[] methods)
+        IVariable IAttachableContext.GetVariable(int index)
         {
-            variables = new IVariable[0];
-            methods = this.GetMethods().ToArray();
+            return Variable.CreateContextPropertyReference(this, index, GetPropName(index));
         }
         
+        BslMethodInfo IAttachableContext.GetMethod(int index)
+        {
+            return GetMethodInfo(index);
+        }
+
+        int IAttachableContext.VariablesCount => GetPropCount();
+        
+        int IAttachableContext.MethodsCount => GetMethodsCount();
+
         public virtual int GetMethodsCount()
         {
-            return _methods.Count;
+            return Methods.Count;
         }
 
         #endregion

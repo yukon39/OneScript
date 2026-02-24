@@ -1,4 +1,4 @@
-﻿/*----------------------------------------------------------
+/*----------------------------------------------------------
 This Source Code Form is subject to the terms of the 
 Mozilla Public License, v.2.0. If a copy of the MPL 
 was not distributed with this file, You can obtain one 
@@ -8,20 +8,33 @@ at http://mozilla.org/MPL/2.0/.
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Types;
+using OneScript.Values;
+using ScriptEngine.Types;
 using System.Reflection;
-using System.Text;
+using OneScript.Execution;
 
 namespace ScriptEngine.Machine.Contexts
 {
     [ContextClass("COMОбъект", "COMObject")]
-    public abstract class COMWrapperContext : PropertyNameIndexAccessor, ICollectionContext, IDisposable, IObjectWrapper, IEnumerable<IValue>
+    public abstract class COMWrapperContext : PropertyNameIndexAccessor, 
+        ICollectionContext<IValue>,
+        IEmptyValueCheck,
+        IDisposable,
+        IObjectWrapper
     {
-        protected static readonly DateTime MIN_OLE_DATE = new DateTime(100,1,1);
+        private static readonly DateTime MIN_OLE_DATE = new DateTime(100,1,1);
+        protected static readonly TypeDescriptor ComObjectType = typeof(COMWrapperContext).GetTypeFromClassMarkup();
+            
+        protected object Instance;
 
-        public COMWrapperContext()
-            : base(TypeManager.GetTypeByFrameworkType(typeof(COMWrapperContext)))
+        protected COMWrapperContext(object instance)
+            : base(ComObjectType)
         {
-
+            Instance = instance;
         }
 
         private static Type FindTypeByName(string typeName)
@@ -37,22 +50,25 @@ namespace ScriptEngine.Machine.Contexts
             return Type.GetType(typeName, throwOnError:false, ignoreCase:true);
         }
 
-        public static COMWrapperContext Create(string progId, IValue[] arguments)
+        private static COMWrapperContext Create(string progId, IValue[] arguments)
         {
             Type type = null;
-            try
+#if NETFRAMEWORK
+            if (!Utils.IsMonoRuntime)
             {
                 type = Type.GetTypeFromProgID(progId, throwOnError: false);
-            }
-            catch (NotImplementedException)
-            {
-                // В Mono GetTypeFromProgID бросает такое исключение.
             }
             if (type == null)
             {
                 type = FindTypeByName(progId);
             }
-
+#else
+            type = FindTypeByName(progId);
+            if (type == null)
+            {
+                type = Type.GetTypeFromProgID(progId, false);
+            }
+#endif
             if (type == null)
             {
                 throw new TypeLoadException(String.Format("Тип {0} не найден!", progId));
@@ -70,7 +86,7 @@ namespace ScriptEngine.Machine.Contexts
                 type = type.MakeGenericType(genericTypes.ToArray());
             }
 
-            object instance = Activator.CreateInstance(type, MarshalArguments(arguments));
+            object instance = Activator.CreateInstance(type, MarshalArguments(arguments).values);
 
             return InitByInstance(type, instance);
         }
@@ -83,8 +99,8 @@ namespace ScriptEngine.Machine.Contexts
         private static COMWrapperContext InitByInstance(Type type, object instance)
         {
             if (TypeIsRuntimeCallableWrapper(type))
-            {
-                return new UnmanagedRCWComContext(instance);
+            {               
+                return new UnmanagedCOMWrapperContext(instance);
             }
             else if (IsObjectType(type) || IsAStruct(type))
             {
@@ -109,30 +125,40 @@ namespace ScriptEngine.Machine.Contexts
             return type.FullName == "System.__ComObject" || type.BaseType.FullName == "System.__ComObject"; // string, cause it's hidden type
         }
 
-        public static object[] MarshalArguments(IValue[] arguments)
+        protected static (object[] values, ParameterModifier[] flags) MarshalArguments(IValue[] arguments)
         {
-            var args = arguments.Select(x => MarshalIValue(x)).ToArray();
-            return args;
+            var values = new object[arguments.Length];
+            ParameterModifier[] flagsArray = new ParameterModifier[1];
+            if (arguments.Length > 0)
+            {
+                var flags = new ParameterModifier(arguments.Length);
+                for (int i = 0; i < arguments.Length; i++)
+                {
+                    values[i] = MarshalIValue(arguments[i]);
+                    flags[i] = arguments[i] is IVariable;
+                }
+
+                flagsArray[0] = flags;
+            }
+            else
+            {
+                flagsArray[0] = new ParameterModifier();
+            }
+
+            return (values, flagsArray);
         }
 
         public static object MarshalIValue(IValue val)
         {
             object retValue;
-            if (val != null && val.DataType == Machine.DataType.Date)
+            if (val is BslDateValue dateVal)
             {
-                var date = val.AsDate();
-                if (date <= MIN_OLE_DATE)
-                {
-                    retValue = MIN_OLE_DATE;
-                }
-                else
-                {
-                    retValue = date;
-                }
+                var date = (DateTime)dateVal;
+                retValue = date < MIN_OLE_DATE ? MIN_OLE_DATE : date;
             }
             else
             {
-                retValue = ContextValuesMarshaller.ConvertToCLRObject(val);
+                retValue = ContextValuesMarshaller.ConvertToClrObject(val) ?? Missing.Value;;
             }
 
             return retValue;
@@ -177,7 +203,7 @@ namespace ScriptEngine.Machine.Contexts
 
         private static bool IsMissedArg(IValue arg)
         {
-            return arg == null || arg.DataType == DataType.NotAValidValue;
+            return arg == null || arg.IsSkippedArgument();
         }
 
         public static IValue CreateIValue(object objParam)
@@ -241,7 +267,7 @@ namespace ScriptEngine.Machine.Contexts
                 {
                     throw new RuntimeException("Тип " + type + " невозможно преобразовать в один из поддерживаемых типов", e);
                 }
-                return ValueFactory.Create(ctx);
+                return ctx;
             }
             
             else
@@ -252,23 +278,20 @@ namespace ScriptEngine.Machine.Contexts
 
         #region ICollectionContext Members
 
-        public int Count()
+        public virtual int Count() => 0;
+
+        public int Count(IBslProcess process) => Count();
+
+        bool IEmptyValueCheck.IsEmpty => false;
+
+        public virtual void Clear()
         {
             throw new NotImplementedException();
-        }
-
-        public void Clear()
-        {
-            throw new NotImplementedException();
-        }
-
-        public CollectionEnumerator GetManagedIterator()
-        {
-            return new CollectionEnumerator(GetEnumerator());
         }
 
         public abstract IEnumerator<IValue> GetEnumerator();
-        public abstract object UnderlyingObject { get; }
+
+        public object UnderlyingObject => Instance;
 
         #region IEnumerable Members
 
@@ -289,7 +312,6 @@ namespace ScriptEngine.Machine.Contexts
             {
                 GC.SuppressFinalize(this);
             }
-
         }
 
         public void Dispose()
@@ -304,18 +326,12 @@ namespace ScriptEngine.Machine.Contexts
 
         #endregion
 
-        public override bool DynamicMethodSignatures
-        {
-            get
-            {
-                return true;
-            }
-        }
-
+        public override bool DynamicMethodSignatures => true;
+ 
         [ScriptConstructor]
-        public static COMWrapperContext Constructor(IValue[] args)
+        public static COMWrapperContext Constructor(TypeActivationContext context, IValue[] args)
         {
-            return COMWrapperContext.Create(args[0].AsString(), args.Skip(1).ToArray());
+            return COMWrapperContext.Create(args[0].AsString(context.CurrentProcess), args.Skip(1).ToArray());
         }
 
     }

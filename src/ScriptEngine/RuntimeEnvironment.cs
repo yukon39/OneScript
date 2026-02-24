@@ -6,183 +6,182 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using ScriptEngine.Compiler;
-using ScriptEngine.Environment;
+using OneScript.Commons;
+using OneScript.Compilation;
+using OneScript.Compilation.Binding;
+using OneScript.Contexts;
+using OneScript.Execution;
+using ScriptEngine.Libraries;
 using ScriptEngine.Machine;
+using SymbolScope = OneScript.Compilation.Binding.SymbolScope;
 
 namespace ScriptEngine
 {
-    public class RuntimeEnvironment
+    [Obsolete("Use interface IRuntimeEnvironment")]
+    public class RuntimeEnvironment : IRuntimeEnvironment, ILibraryManager
     {
-        private readonly List<IAttachableContext> _objects = new List<IAttachableContext>();
-        private readonly CompilerContext _symbolScopes = new CompilerContext();
-        private SymbolScope _globalScope;
-        private PropertyBag _injectedProperties;
+        private readonly SymbolTable _symbols = new SymbolTable();
+        private SymbolScope _scopeOfGlobalProperties;
+        
+        private readonly PropertyBag _injectedProperties;
 
-        private readonly List<UserAddedScript> _externalScripts = new List<UserAddedScript>();
+        private readonly List<IAttachableContext> _contexts = new List<IAttachableContext>();
+
+        private readonly ILibraryManager _libraryManager;
+
+        public RuntimeEnvironment()
+        {
+            _injectedProperties = new PropertyBag();
+            _libraryManager = new LibraryManager(_injectedProperties);
+        }
+
+        private void CreateGlobalScopeIfNeeded()
+        {
+            if (_scopeOfGlobalProperties != null) 
+                return;
+            
+            lock (_injectedProperties)
+            {
+                _scopeOfGlobalProperties ??= _symbols.PushContext(_injectedProperties);
+                _contexts.Add(_injectedProperties);
+            }
+        }
 
         public void InjectObject(IAttachableContext context)
         {
-            InjectObject(context, false);
-        }
-
-        public void InjectObject(IAttachableContext context, bool asDynamicScope)
-        {
-            RegisterSymbolScope(context, asDynamicScope);
             RegisterObject(context);
         }
 
+        public void InjectGlobalProperty(IValue value, string identifier, string alias, bool readOnly)
+        {
+            InjectPropertyInternal(value, identifier, alias, readOnly, null);
+        }
+        
         public void InjectGlobalProperty(IValue value, string identifier, bool readOnly)
         {
+            InjectGlobalProperty(value, identifier, default, readOnly);
+        }
+
+        public void InjectGlobalProperty(IValue value, string identifier, PackageInfo ownerPackage)
+        {
+            InjectPropertyInternal(value, identifier, default, true, ownerPackage);
+        }
+
+        private void InjectPropertyInternal(
+            IValue value,
+            string identifier,
+            string alias,
+            bool readOnly,
+            PackageInfo ownerPackage)
+        {
+            ArgumentNullException.ThrowIfNull(value);
             if(!Utils.IsValidIdentifier(identifier))
             {
-                throw new ArgumentException("Invalid identifier", "identifier");
+                throw new ArgumentException("Invalid identifier", nameof(identifier));
             }
 
-            if (_globalScope == null)
+            if (alias != default && !Utils.IsValidIdentifier(alias))
             {
-                _globalScope = new SymbolScope();
-                TypeManager.RegisterType("__globalPropertiesHolder", typeof(PropertyBag));
-                _injectedProperties = new PropertyBag();
-                _symbolScopes.PushScope(_globalScope);
-                RegisterObject(_injectedProperties);
+                throw new ArgumentException("Invalid identifier", nameof(alias));
             }
-            
-            _globalScope.DefineVariable(identifier, SymbolType.ContextProperty);
-            _injectedProperties.Insert(value, identifier, true, !readOnly);
-        }
+            CreateGlobalScopeIfNeeded();
+            var num = _injectedProperties.Insert(value, identifier, true, !readOnly);
 
-        public void SetGlobalProperty(string propertyName, IValue value)
-        {
-            int propId = _injectedProperties.FindProperty(propertyName);
-            _injectedProperties.SetPropValue(propId, value);
-        }
-
-        public IValue GetGlobalProperty(string propertyName)
-        {
-            int propId = _injectedProperties.FindProperty(propertyName);
-            return _injectedProperties.GetPropValue(propId);
-        }
-
-        internal CompilerContext SymbolsContext
-        {
-            get
+            var bslPropertyInfo = _injectedProperties.GetPropertyInfo(num);
+            IVariableSymbol registeredSymbol;
+            if (ownerPackage == null)
             {
-                return _symbolScopes;
-            }
-        }
-
-        internal IList<IAttachableContext> AttachedContexts
-        {
-            get
-            {
-                return _objects;
-            }
-        }
-
-        [Obsolete]
-        public void NotifyClassAdded(ScriptModuleHandle module, string symbol)
-        {
-            NotifyClassAdded(module.Module, symbol);
-        }
-
-        [Obsolete]
-        public void NotifyModuleAdded(ScriptModuleHandle module, string symbol)
-        {
-            NotifyModuleAdded(module.Module, symbol);
-        }
-
-        public void NotifyClassAdded(ModuleImage module, string symbol)
-        {
-            _externalScripts.Add(new UserAddedScript()
+                registeredSymbol = new WrappedPropertySymbol(bslPropertyInfo)
                 {
-                    Type = UserAddedScriptType.Class,
-                    Symbol = symbol,
-                    Image = module
-                });
-        }
-        
-        public void NotifyModuleAdded(ModuleImage module, string symbol)
-        {
-            var script = new UserAddedScript()
+                    Name = identifier,
+                    Alias = alias
+                };
+            }
+            else
             {
-                Type = UserAddedScriptType.Module,
-                Symbol = symbol,
-                Image = module
+                registeredSymbol = new WrappedLibraryPropertySymbol(bslPropertyInfo, ownerPackage)
+                {
+                    Name = identifier,
+                    Alias = alias
+                };
+            }
+
+            _scopeOfGlobalProperties.DefineVariable(registeredSymbol);
+        }
+
+        public void InjectGlobalProperty(IValue value, BslPropertyInfo definition)
+        {
+            CreateGlobalScopeIfNeeded();
+            _injectedProperties.Insert(value, definition);
+
+            var symbol = new WrappedPropertySymbol(definition)
+            {
+                Name = definition.Name,
+                Alias = definition.Alias
             };
 
-            _externalScripts.Add(script);
-            SetGlobalProperty(script.Symbol, null);
-        }
-        
-        public IEnumerable<UserAddedScript> GetUserAddedScripts()
-        {
-            // Костыль. Чтобы скомпилированный EXE загружал модули в правильном порядке,
-            // упорядочиваем список в том порядке, в котором добавлялись свойства.
-            return _externalScripts.OrderBy(script =>
-            {
-                try
-                {
-                    return _injectedProperties.FindProperty(script.Symbol);
-                }
-                catch
-                {
-                    return 0;
-                }
-            });
-        }
-
-        private void RegisterSymbolScope(IRuntimeContextInstance provider, bool asDynamicScope)
-        {
-            var scope = new SymbolScope();
-            scope.IsDynamicScope = asDynamicScope;
-            
-            _symbolScopes.PushScope(scope);
-            foreach (var item in provider.GetProperties())
-            {
-                _symbolScopes.DefineVariable(item.Identifier);
-            }
-
-            foreach (var item in provider.GetMethods())
-            {
-                _symbolScopes.DefineMethod(item);
-            }
+            _scopeOfGlobalProperties.DefineVariable(symbol);
         }
 
         private void RegisterObject(IAttachableContext context)
         {
-            _objects.Add(context);
+            _symbols.PushContext(context);
+            _contexts.Add(context);
         }
-
-        public void LoadMemory(MachineInstance machine)
+        
+        public void SetGlobalProperty(string propertyName, IValue value)
         {
-            machine.Cleanup();
-            foreach (var item in AttachedContexts)
+            _symbols.FindVariable(propertyName, out var binding);
+
+            var context = _contexts[binding.ScopeNumber];
+            context.SetPropValue(binding.MemberNumber, value);
+        }
+
+        public IValue GetGlobalProperty(string propertyName)
+        {
+            _symbols.FindVariable(propertyName, out var binding);
+
+            var context = _contexts[binding.ScopeNumber];
+            return context.GetPropValue(binding.MemberNumber);
+        }
+
+        public SymbolTable GetSymbolTable() => _symbols;
+
+        public IReadOnlyList<IAttachableContext> AttachedContexts => _contexts;
+
+        public void InitExternalLibrary(ScriptingEngine runtime, ExternalLibraryInfo library, IBslProcess process)
+        {
+            _libraryManager.InitExternalLibrary(runtime, library, process);
+        }
+
+        private class WrappedPropertySymbol : IPropertySymbol
+        {
+            public WrappedPropertySymbol(BslPropertyInfo propInfo)
             {
-                machine.AttachContext(item);
+                Property = propInfo;
             }
-            machine.ContextsAttached();
+
+            public string Name { get; set; }
+            public string Alias { get; set; }
+            public Type Type => Property.PropertyType;
+            public BslPropertyInfo Property { get; }
         }
-    }
+        
+        private class WrappedLibraryPropertySymbol : IPropertySymbol, IPackageSymbol
+        {
+            public WrappedLibraryPropertySymbol(BslPropertyInfo propInfo, PackageInfo ownerPackage)
+            {
+                Property = propInfo;
+                Package = ownerPackage;
+            }
 
-    public struct UserAddedScript
-    {
-        public UserAddedScriptType Type;
-        public ModuleImage Image;
-        public string Symbol;
+            public string Name { get; set; }
+            public string Alias { get; set; }
+            public Type Type => Property.PropertyType;
+            public BslPropertyInfo Property { get; }
+            private PackageInfo Package { get; }
 
-        [Obsolete]
-        public ScriptModuleHandle Module {
-            get => new ScriptModuleHandle() {Module = Image}; 
-            set => Image = value.Module;
+            public PackageInfo GetPackageInfo() => Package;
         }
-    }
-
-    public enum UserAddedScriptType
-    {
-        Module,
-        Class
     }
 }

@@ -3,8 +3,9 @@
   <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
 
   <PropertyGroup>
-    <TargetFrameworks>net452</TargetFrameworks>
-    <Configurations>Debug;Release;ReleaseNetStandard</Configurations>
+    <TargetFramework>$(TargetFrameworkVersion)</TargetFramework>
+    <Configurations>Debug;Release;LinuxDebug</Configurations>
+    <Platforms>AnyCPU</Platforms>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -30,5 +31,9 @@
   <PropertyGroup>
     <PostBuildEvent Condition="  '$(OS)' == 'Windows_NT' ">xcopy "$(TargetDir)Component.dll" "$(SolutionDir)..\tests\component" /Y /E /D</PostBuildEvent>
     <PostBuildEvent Condition="  '$(OS)' == 'Unix' ">cp -f "$(TargetDir)Component.dll" "$(SolutionDir)../tests/component"</PostBuildEvent>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+    <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+    <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
   </PropertyGroup>
 </Project>

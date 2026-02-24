@@ -4,54 +4,54 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
+
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using ScriptEngine;
-using ScriptEngine.Environment;
-using ScriptEngine.Machine;
-using ScriptEngine.Machine.Contexts;
+using OneScript.Compilation;
+using OneScript.Compilation.Binding;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Sources;
 
 namespace ScriptEngine.Machine.Contexts
 {
-    public abstract class AutoScriptDrivenObject<T> : ScriptDrivenObject where T : AutoScriptDrivenObject<T>
+    public abstract class AutoScriptDrivenObject<T> : ThisAwareScriptedObjectBase where T : AutoScriptDrivenObject<T>
     {
-        private const int THISOBJ_VARIABLE_INDEX = 0;
-        private const string THISOBJ_EN = "ThisObject";
-        private const string THISOBJ_RU = "ЭтотОбъект";
-        private const int PRIVATE_PROPS_OFFSET = 1;
+        private readonly int _privatePropsOffset;
 
         protected static readonly ContextPropertyMapper<T> _ownProperties = new ContextPropertyMapper<T>();
         protected static readonly ContextMethodsMapper<T> _ownMethods = new ContextMethodsMapper<T>();
 
         #region SDO Methods
 
-        protected AutoScriptDrivenObject(LoadedModule module, bool deffered)
-            : base(module, deffered)
+        protected AutoScriptDrivenObject(IExecutableModule module, bool deferred)
+            : base(module, deferred)
+        {
+            _privatePropsOffset = base.GetOwnVariableCount();
+            if (!deferred)
+                InitOwnData();
+        }
+
+        protected AutoScriptDrivenObject(IExecutableModule module)
+            : this(module, false)
         {
         }
 
-        protected AutoScriptDrivenObject(LoadedModule module)
-            : base(module)
-        {
-        }
-
-        protected AutoScriptDrivenObject()
+        protected AutoScriptDrivenObject() : this(EmptyModule.Instance)
         {
         }
 
         protected override string GetOwnPropName(int index)
         {
-            if (index == THISOBJ_VARIABLE_INDEX)
-                return THISOBJ_RU;
+            if (index < _privatePropsOffset)
+                return base.GetOwnPropName(index);
 
-            return _ownProperties.GetProperty(index - PRIVATE_PROPS_OFFSET).Name;
+            return _ownProperties.GetProperty(index - _privatePropsOffset).Name;
         }
 
         protected override int GetOwnVariableCount()
         {
-            return _ownProperties.Count + PRIVATE_PROPS_OFFSET;
+            return _ownProperties.Count + _privatePropsOffset;
         }
 
         protected override int GetOwnMethodCount()
@@ -59,48 +59,44 @@ namespace ScriptEngine.Machine.Contexts
             return _ownMethods.Count;
         }
 
-        protected override void UpdateState()
-        {
-        }
-
         protected override int FindOwnProperty(string name)
         {
-            if (string.Compare(name, THISOBJ_RU, StringComparison.OrdinalIgnoreCase) == 0
-                || string.Compare(name, THISOBJ_EN, StringComparison.OrdinalIgnoreCase) == 0)
+            var baseIndex = base.FindOwnProperty(name);
+            if (baseIndex != -1)
             {
-                return THISOBJ_VARIABLE_INDEX;
+                return baseIndex;
             }
 
-            return _ownProperties.FindProperty(name) + PRIVATE_PROPS_OFFSET;
+            return _ownProperties.FindProperty(name) + _privatePropsOffset;
         }
 
         protected override bool IsOwnPropReadable(int index)
         {
-            if (index == THISOBJ_VARIABLE_INDEX)
-                return true;
+            if (index < _privatePropsOffset)
+                return base.IsOwnPropReadable(index);
 
-            return _ownProperties.GetProperty(index - PRIVATE_PROPS_OFFSET).CanRead;
+            return _ownProperties.GetProperty(index - _privatePropsOffset).CanRead;
         }
 
         protected override bool IsOwnPropWritable(int index)
         {
-            if (index == THISOBJ_VARIABLE_INDEX)
+            if (index < _privatePropsOffset)
                 return false;
 
-            return _ownProperties.GetProperty(index - PRIVATE_PROPS_OFFSET).CanWrite;
+            return _ownProperties.GetProperty(index - _privatePropsOffset).CanWrite;
         }
 
         protected override IValue GetOwnPropValue(int index)
         {
-            if (index == THISOBJ_VARIABLE_INDEX)
+            if (index < _privatePropsOffset)
                 return this;
 
-            return _ownProperties.GetProperty(index - PRIVATE_PROPS_OFFSET).Getter((T)this);
+            return _ownProperties.GetProperty(index - _privatePropsOffset).Getter((T)this);
         }
 
         protected override void SetOwnPropValue(int index, IValue val)
         {
-            _ownProperties.GetProperty(index - PRIVATE_PROPS_OFFSET).Setter((T)this, val);
+            _ownProperties.GetProperty(index - _privatePropsOffset).Setter((T)this, val);
         }
 
         protected override int FindOwnMethod(string name)
@@ -116,38 +112,45 @@ namespace ScriptEngine.Machine.Contexts
             }
         }
 
-        protected override MethodInfo GetOwnMethod(int index)
+        protected override BslMethodInfo GetOwnMethod(int index)
         {
-            return _ownMethods.GetMethodInfo(index);
+            return _ownMethods.GetRuntimeMethod(index);
         }
 
-        protected override IValue CallOwnFunction(int index, IValue[] arguments)
+        protected override IValue CallOwnFunction(int index, IValue[] arguments, IBslProcess process)
         {
-            return _ownMethods.GetMethod(index)((T)this, arguments);
+            return _ownMethods.GetCallableDelegate(index)((T)this, arguments, process);
         }
 
-        protected override void CallOwnProcedure(int index, IValue[] arguments)
+        protected override void CallOwnProcedure(int index, IValue[] arguments, IBslProcess process)
         {
-            _ownMethods.GetMethod(index)((T)this, arguments);
+            _ownMethods.GetCallableDelegate(index)((T)this, arguments, process);
         }
 
         #endregion
 
-        public static ModuleImage CompileModule(CompilerService compiler, ICodeSource src)
+        [SymbolsProvider]
+        private static void FillSymbols(TypeSymbolsProviderFactory providerFactory, SymbolScope moduleScope)
         {
-            compiler.DefineVariable(THISOBJ_RU, THISOBJ_EN, SymbolType.ContextProperty);
+            var baseProvider = providerFactory.Get<ThisAwareScriptedObjectBase>();
+            baseProvider.FillSymbols(moduleScope);
+            
             for (int i = 0; i < _ownProperties.Count; i++)
             {
                 var currentProp = _ownProperties.GetProperty(i);
-                compiler.DefineVariable(currentProp.Name, currentProp.Alias, SymbolType.ContextProperty);
+                moduleScope.Variables.Add(currentProp.PropertyInfo.ToSymbol());
             }
 
             for (int i = 0; i < _ownMethods.Count; i++)
             {
-                compiler.DefineMethod(_ownMethods.GetMethodInfo(i));
+                moduleScope.Methods.Add(_ownMethods.GetRuntimeMethod(i).ToSymbol());
             }
-
-            return compiler.Compile(src);
+        }
+        
+        public static IExecutableModule CompileModule(ICompilerFrontend compiler, SourceCode src, Type type, IBslProcess process)
+        {
+            compiler.FillSymbols(typeof(AutoScriptDrivenObject<T>));
+            return compiler.Compile(src, process, type);
         }
     }
 

@@ -5,10 +5,7 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
-using System;
-using System.IO;
 using System.Diagnostics;
-using System.Linq;
 using System.Collections.Generic;
 
 namespace ScriptEngine.Machine
@@ -19,10 +16,6 @@ namespace ScriptEngine.Machine
         private Dictionary<CodeStatEntry, Stopwatch> _watchers = new Dictionary<CodeStatEntry, Stopwatch>();
         private Stopwatch _activeStopwatch = null;
         private HashSet<string> _preparedScripts = new HashSet<string>();
-
-        public CodeStatProcessor()
-        {
-        }
 
         public bool IsPrepared(string ScriptFileName)
         {

@@ -5,13 +5,8 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
-using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
-
-using ScriptEngine.Environment;
+using OneScript.Language.Sources;
 
 namespace TestApp
 {
@@ -28,17 +23,11 @@ namespace TestApp
 			_code = code;
 		}
 
-		private string GetCodeString()
+		public string GetSourceCode()
 		{
 			return _code;
 		}
 
-		#region ICodeSource Members
-
-		string ICodeSource.Code => GetCodeString();
-
-		string ICodeSource.SourceDescription => _path != "" ? _path : "<string>";
-
-		#endregion
+		public string Location => _path != "" ? _path : "<string>";
 	}
 }

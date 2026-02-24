@@ -6,9 +6,8 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
 using System;
-
-using ScriptEngine;
-using ScriptEngine.HostedScript.Library;
+using OneScript.Language;
+using OneScript.StandardLibrary;
 
 namespace oscript
 {
@@ -55,25 +54,57 @@ namespace oscript
 		}
 
 		public static void ShowExceptionInfo(Exception exc)
-		{
-		    var exception = exc as ScriptException;
-		    if (exception != null)
-		    {
-		        var rte = exception;
-		        Echo(rte.MessageWithoutCodeFragment);
-		    }
+		{ 
+			if (exc is ScriptException exception)
+			{
+			    var rte = exception;
+			    Echo(rte.MessageWithoutCodeFragment);
+			}
 		    else
-		        Echo(exc.Message);
+		         Echo(exc.ToString());
 		}
 
-		public static bool InputString(out string result, int maxLen)
+		public static bool InputString(out string result, string prompt, int maxLen, bool multiline)
 		{
-			if (maxLen == 0)
-				result = Console.ReadLine();
-			else
-				result = Console.ReadLine()?.Substring(0, maxLen);
+			if( !String.IsNullOrEmpty(prompt) )
+				Console.Write(prompt);
 
-			return result?.Length > 0;
+			result = multiline ? ReadMultilineString() : Console.ReadLine();
+			
+			if (result == null)
+				return false;
+
+			if (maxLen > 0 && maxLen < result.Length)
+				result = result.Substring(0, maxLen);
+
+			return true;
 		}
+		
+		private static string ReadMultilineString()
+        {
+			string read;
+			System.Text.StringBuilder text = null;
+
+			while (true)
+			{
+				read = Console.ReadLine();
+
+				if (read == null)
+					break;
+
+				if (text == null)
+				{
+					text = new System.Text.StringBuilder(read);
+				}
+				else
+				{
+					text.Append("\n");
+					text.Append(read);
+				}
+			}
+
+			return text?.ToString();
+		}
+
 	}
 }

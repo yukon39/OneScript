@@ -7,23 +7,25 @@ at http://mozilla.org/MPL/2.0/.
 
 using System;
 using System.Collections;
+using System.IO;
 using System.Text;
-
+using System.Threading.Tasks;
+using OneScript.Contexts;
+using OneScript.StandardLibrary.Binary;
+using OneScript.StandardLibrary.Collections;
+using OneScript.StandardLibrary.Text;
 using oscript.Web.Multipart;
-
-using ScriptEngine.HostedScript.Library;
-using ScriptEngine.HostedScript.Library.Binary;
 using ScriptEngine.Machine;
 using ScriptEngine.Machine.Contexts;
 
 namespace oscript.Web
 {
 	[ContextClass("ВебЗапрос", "WebRequest")]
-	public class WebRequestContext : AutoContext<WebRequestContext>
+	public sealed class WebRequestContext : AutoContext<WebRequestContext>, IDisposable, IAsyncDisposable
 	{
 		private PostRequestData _post;
 
-		private byte[] _postRaw;
+		private FileBackingStream _postBody;
 
 		public WebRequestContext()
 		{
@@ -34,14 +36,6 @@ namespace oscript.Web
 
 			FillEnvironmentVars();
 		}
-
-		[Obsolete]
-		[ContextProperty("GET")]
-		public IValue GET => _post.Params;
-
-		[Obsolete]
-		[ContextProperty("POST")]
-		public IValue POST => _post;
 
 		/// <summary>
 		///     Параметры запроса
@@ -70,23 +64,27 @@ namespace oscript.Web
 			var len = int.Parse(contentLen);
 			if (len == 0)
 				return;
-
-			_postRaw = new byte[len];
-			using (var stdin = Console.OpenStandardInput())
-			{
-				stdin.Read(_postRaw, 0, len);
-			}
-
+			
 			var type = Environment.GetEnvironmentVariable("CONTENT_TYPE");
+			
+			using var stdin = Console.OpenStandardInput();
+			var dest = new FileBackingStream(FileBackingConstants.DEFAULT_MEMORY_LIMIT, len);
+			stdin.CopyTo(dest);
+			dest.Position = 0;
+			
 			if (type != null && type.StartsWith("multipart/"))
 			{
 				var boundary = type.Substring(type.IndexOf('=') + 1);
-				_post = new PostRequestData(_postRaw, boundary);
+				_post = new PostRequestData(dest, boundary);
 			}
 			else
 			{
-				_post = new PostRequestData(Encoding.UTF8.GetString(_postRaw));
+				using var reader = new StreamReader(dest, Encoding.UTF8, leaveOpen: true);
+				_post = new PostRequestData(reader.ReadToEnd());
 			}
+
+			dest.Position = 0;
+			_postBody = dest;
 		}
 
 		private void FillEnvironmentVars()
@@ -108,7 +106,8 @@ namespace oscript.Web
 		[ContextMethod("ПолучитьТелоКакДвоичныеДанные", "GetBodyAsBinaryData")]
 		public BinaryDataContext GetBodyAsBinaryData()
 		{
-			return new BinaryDataContext(_postRaw);
+			_postBody.Position = 0;
+			return new BinaryDataContext(_postBody);
 		}
 
 		[ContextMethod("ПолучитьТелоКакСтроку", "GetBodyAsString")]
@@ -118,7 +117,19 @@ namespace oscript.Web
 				? new UTF8Encoding(false)
 				: TextEncodingEnum.GetEncoding(encoding);
 
-			return enc.GetString(_postRaw);
+			_postBody.Position = 0;
+			using var streamReader = new StreamReader(_postBody, enc);
+			return streamReader.ReadToEnd();
+		}
+
+		public void Dispose()
+		{
+			_postBody?.Dispose();
+		}
+
+		public async ValueTask DisposeAsync()
+		{
+			if (_postBody != null) await _postBody.DisposeAsync();
 		}
 	}
 }

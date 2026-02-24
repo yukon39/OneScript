@@ -1,0 +1,122 @@
+/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the
+Mozilla Public License, v.2.0. If a copy of the MPL
+was not distributed with this file, You can obtain one
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Language;
+using OneScript.StandardLibrary.Collections;
+using ScriptEngine.Machine;
+using ScriptEngine.Machine.Contexts;
+
+namespace OneScript.StandardLibrary.Tasks
+{
+    [ContextClass("ФоновоеЗадание", "BackgroundTask")]
+    public class BackgroundTask : AutoContext<BackgroundTask>
+    {
+        private readonly BslMethodInfo _method;
+        private readonly int _methIndex;
+        private Task _workerTask;
+        private int _taskId;
+        
+        public BackgroundTask(IRuntimeContextInstance target, string methodName, ArrayImpl parameters = default)
+        {
+            Target = target;
+            MethodName = methodName;
+            if(parameters != default)
+                Parameters = new ArrayImpl(parameters);
+            
+            Identifier = new GuidWrapper();
+            
+            _methIndex = Target.GetMethodNumber(MethodName);
+            _method = Target.GetMethodInfo(_methIndex);
+        }
+
+        public Task WorkerTask
+        {
+            get => _workerTask;
+            set
+            {
+                _workerTask = value;
+                _taskId = _workerTask.Id;
+            }
+        }
+
+        public int TaskId => _taskId;
+
+        [ContextProperty("УникальныйИдентификатор","UUID")]
+        public GuidWrapper Identifier { get; private set; }
+        
+        [ContextProperty("ИмяМетода","MethodName")]
+        public string MethodName { get; private set; }
+        
+        [ContextProperty("Объект","Object")]
+        public IRuntimeContextInstance Target { get; private set; }
+
+        [ContextProperty("Состояние", "State")]
+        public TaskStateEnum State { get; private set; }
+
+        [ContextProperty("Параметры", "Parameters")]
+        public IValue Parameters { get; private set; } = ValueFactory.Create();
+
+        [ContextProperty("Результат", "Result")]
+        public IValue Result { get; private set; } = ValueFactory.Create();
+
+        [ContextProperty("ИнформацияОбОшибке", "ExceptionInfo")]
+        public ExceptionInfoContext ExceptionInfo { get; private set; }
+
+        /// <summary>
+        /// Ждать завершения задания указанное число миллисекунд
+        /// </summary>
+        /// <param name="timeout">Таймаут в миллисекундах. Если ноль - ждать вечно</param>
+        /// <returns>Истина - дождались завершения. Ложь - сработал таймаут</returns>
+        [ContextMethod("ОжидатьЗавершения", "Wait")]
+        public bool Wait(int timeout = 0)
+        {
+            timeout = BackgroundTasksManager.ConvertTimeout(timeout);
+            
+            return WorkerTask.Wait(timeout);
+        }
+        
+        public void ExecuteOnCurrentThread(IBslProcess process)
+        {
+            if (State != TaskStateEnum.NotRunned)
+                throw new RuntimeException(Locale.NStr("ru = 'Неверное состояние задачи';en = 'Incorrect task status'"));
+
+            var parameters = Parameters is ArrayImpl array ?
+                array.ToArray() : Array.Empty<IValue>();
+
+            try
+            {
+                State = TaskStateEnum.Running;
+                if (_method.IsFunction())
+                {
+                    Target.CallAsFunction(_methIndex, parameters, out var result, process);
+                    Result = result;
+                }
+                else
+                {
+                    Target.CallAsProcedure(_methIndex, parameters, process);
+                }
+
+                State = TaskStateEnum.Completed;
+            }
+            catch (ScriptException exception)
+            {
+                State = TaskStateEnum.CompletedWithErrors;
+                exception.RuntimeSpecificInfo = process.Services
+                    .TryResolve<StackMachineProvider>()?.Machine?.GetExecutionFrames();
+                
+                ExceptionInfo = new ExceptionInfoContext(exception);
+            }
+        }
+    }
+}

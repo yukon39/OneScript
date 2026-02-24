@@ -5,20 +5,19 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Exceptions;
 
 namespace ScriptEngine.Machine
 {
     public class ParametrizedRuntimeException : RuntimeException
     {
-        public ParametrizedRuntimeException(string msg, IValue parameter) : base(msg)
+        public ParametrizedRuntimeException(string msg, IValue parameter, IValue cause = null) : base(msg)
         {
             Parameter = parameter;
+            Cause = cause;
         }
 
         public IValue Parameter { get; private set; }
+        public IValue Cause { get; private set; }
     }
 }

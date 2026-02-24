@@ -6,10 +6,7 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
-using System.Text;
 
 namespace oscript
 {
@@ -29,6 +26,12 @@ namespace oscript
 			Output.WriteLine("\nScript completed: " + DateTime.Now);
 			Output.WriteLine("\nDuration: " + sw.Elapsed);
 			return exitCode;
+		}
+
+		public static AppBehavior Create(CmdLineHelper helper)
+		{
+			var path = helper.Next();
+            return path != null ? new MeasureBehavior(path, helper.Tail()) : null;
 		}
 	}
 }

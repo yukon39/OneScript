@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
+    
+    <PropertyGroup>
+        <TargetFramework>$(TargetFrameworkVersion)</TargetFramework>
+        <Configurations>Debug;Release;LinuxDebug</Configurations>
+        <Platforms>AnyCPU</Platforms>
+    </PropertyGroup>
+    
+    <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+      <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+      <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
+      <DebugSymbols>true</DebugSymbols>
+      <DefineConstants>TRACE; DEBUG;</DefineConstants>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\OneScript.Core\OneScript.Core.csproj" />
+        <ProjectReference Include="..\OneScript.Language\OneScript.Language.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+    </ItemGroup>
+    
+</Project>

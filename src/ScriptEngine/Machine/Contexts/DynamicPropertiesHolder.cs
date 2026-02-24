@@ -6,20 +6,36 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Exceptions;
 
 namespace ScriptEngine.Machine.Contexts
 {
     public class DynamicPropertiesHolder
     {
-        private readonly Dictionary<string, int> _propNumbers = new Dictionary<string, int>(StringComparer.InvariantCultureIgnoreCase);
+        private readonly IndexedNameValueCollection<BslPropertyInfo> _propDefs =
+            new IndexedNameValueCollection<BslPropertyInfo>();
+
+        public delegate BslPropertyInfo PropertyInfoFactory(int index, string name, bool canRead, bool canWrite);
         
-        public int RegisterProperty(string name)
+        private readonly PropertyInfoFactory _infoFactory = MakeProperty;
+
+        public DynamicPropertiesHolder()
         {
-            if (_propNumbers.ContainsKey(name))
+        }
+
+        public DynamicPropertiesHolder(PropertyInfoFactory infoFactory)
+        {
+            _infoFactory = infoFactory;
+        }
+        
+        public int RegisterProperty(string name, bool canRead = true, bool canWrite = true)
+        {
+            var index = _propDefs.IndexOf(name); 
+            if (index != -1)
             {
-                return _propNumbers[name];
+                return index;
             }
 
             if (!IsValidIdentifier(name))
@@ -27,67 +43,66 @@ namespace ScriptEngine.Machine.Contexts
                 throw RuntimeException.InvalidArgumentValue();
             }
 
-            var idx = _propNumbers.Count;
-            _propNumbers.Add(name, idx);
-            return idx;
+            index = _propDefs.Count;
+            return _propDefs.Add(_infoFactory(index, name, canRead, canWrite), name);
+        }
+        
+        public int RegisterProperty(BslPropertyInfo prop)
+        {
+            var index = _propDefs.IndexOf(prop.Name);
+            if (index != -1)
+            {
+                throw new ArgumentException($"Property {prop.Name} already exists");
+            }
+            
+            return _propDefs.Add(prop, prop.Name);
+        }
+
+        private static BslPropertyInfo MakeProperty(int index, string name, bool canRead, bool canWrite)
+        {
+            return BslPropertyBuilder.Create()
+                .Name(name)
+                .SetDispatchingIndex(index)
+                .CanRead(canRead)
+                .CanWrite(canWrite)
+                .Build();
         }
 
         public void RemoveProperty(string name)
         {
-            _propNumbers.Remove(name);
-        }
-
-        public void ReorderPropertyNumbers()
-        {
-            var sorted = _propNumbers.OrderBy(x => x.Value).Select(x => x.Key).ToArray();
-            _propNumbers.Clear();
-            for (int i = 0; i < sorted.Length; i++)
-            {
-                _propNumbers.Add(sorted[i], i);
-            }
+            _propDefs.RemoveValue(name);
         }
 
         public void ClearProperties()
         {
-            _propNumbers.Clear();
+            _propDefs.Clear();
         }
 
         public int GetPropertyNumber(string name)
         {
-            try
-            {
-                return _propNumbers[name];
-            }
-            catch (KeyNotFoundException)
-            {
-                throw RuntimeException.PropNotFoundException(name);
-            }
+            var index = _propDefs.IndexOf(name);
+            if (index != -1)
+                return index;
+            
+            throw PropertyAccessException.PropNotFoundException(name);
         }
 
         public string GetPropertyName(int idx)
         {
-            return _propNumbers.First(x => x.Value == idx).Key;
+            return _propDefs[idx].Name;
         }
 
         public IEnumerable<KeyValuePair<string, int>> GetProperties()
         {
-            return _propNumbers.AsEnumerable();
+            return _propDefs.GetIndex();
         }
 
-        public VariableInfo GetPropertyInfo(int idx)
-        {
-            return new VariableInfo()
-            {
-                Identifier = GetPropertyName(idx),
-                CanGet = true,
-                CanSet = true,
-                Index = idx,
-                Type = SymbolType.ContextProperty
-            };
-        }
+        public int Count => _propDefs.Count;
 
-        public int Count => _propNumbers.Count;
+        public BslPropertyInfo this[int index] => _propDefs[index];
         
+        public BslPropertyInfo this[string name] => _propDefs[name];
+
         private bool IsValidIdentifier(string name)
         {
             return Utils.IsValidIdentifier(name);

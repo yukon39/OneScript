@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
+    <PropertyGroup>
+        <TargetFramework>$(TargetFrameworkVersion)</TargetFramework>
+        <RootNamespace>OneScript</RootNamespace>
+        <Configurations>Debug;Release;LinuxDebug</Configurations>
+        <Platforms>AnyCPU</Platforms>
+    </PropertyGroup>
+    <ItemGroup>
+      <ProjectReference Include="..\OneScript.Language\OneScript.Language.csproj" />
+    </ItemGroup>
+
+    <PropertyGroup>
+        <PackageId>OneScript.CoreLib</PackageId>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+      <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+      <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
+    </PropertyGroup>
+    
+</Project>

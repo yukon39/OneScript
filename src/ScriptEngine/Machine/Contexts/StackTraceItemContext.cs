@@ -5,11 +5,7 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using OneScript.Contexts;
 
 namespace ScriptEngine.Machine.Contexts
 {
@@ -28,7 +24,7 @@ namespace ScriptEngine.Machine.Contexts
         [ContextProperty("ИмяМодуля", CanWrite = false)]
         public string ModuleName { get; set; }
 
-        public override string AsString()
+        public override string ToString()
         {
             return $"{Method}: {LineNumber} ({ModuleName})";
         }

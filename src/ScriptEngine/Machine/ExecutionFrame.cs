@@ -4,33 +4,33 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
-using System;
+
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Contexts;
+using OneScript.Language;
 
 namespace ScriptEngine.Machine
 {
-    class ExecutionFrame
+    internal class ExecutionFrame
     {
         public IVariable[] Locals;
         public int InstructionPointer;
         public int LineNumber;
         public bool DiscardReturnValue;
         public string MethodName;
-        public RuntimeException LastException;
-        public LoadedModule Module;
+        public ScriptException LastException;
+        public StackRuntimeModule Module;
         public bool IsReentrantCall;
         
-        public Stack<IValue> LocalFrameStack = new Stack<IValue>();
+        public readonly Stack<IValue> LocalFrameStack = new Stack<IValue>();
 
-
-        public Scope ModuleScope { get; set; }
-        public int ModuleLoadIndex { get; set; }
+        public IAttachableContext ThisScope { get; set; }
+        
+        public IReadOnlyList<IAttachableContext> Scopes { get; set; }
 
         public override string ToString()
         {
-            return $"{MethodName}: {LineNumber} ({Module.ModuleInfo.ModuleName})";
+            return $"{MethodName}: {LineNumber} ({Module.Source.Name})";
         }
     }
 

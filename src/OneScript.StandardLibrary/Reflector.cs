@@ -1,0 +1,571 @@
+/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the 
+Mozilla Public License, v.2.0. If a copy of the MPL 
+was not distributed with this file, You can obtain one 
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.StandardLibrary.Collections;
+using OneScript.StandardLibrary.Collections.ValueTable;
+using OneScript.StandardLibrary.TypeDescriptions;
+using OneScript.Types;
+using OneScript.Values;
+using ScriptEngine.Machine;
+using ScriptEngine.Machine.Contexts;
+
+namespace OneScript.StandardLibrary
+{
+    /// <summary>
+    /// Рефлектор предназначен для получения метаданных объектов во время выполнения.
+    /// Как правило, рефлексия используется для проверки наличия у объекта определенных свойств/методов.
+    /// В OneScript рефлексию можно применять для вызова методов объектов по именам методов.
+    /// </summary>
+    [ContextClass("Рефлектор", "Reflector")]
+    public class ReflectorContext : AutoContext<ReflectorContext>
+    {
+        private readonly ITypeManager _typeManager;
+
+        private ReflectorContext(ITypeManager typeManager)
+        {
+            _typeManager = typeManager;
+        }
+
+        /// <summary>
+        /// Вызывает метод по его имени.
+        /// </summary>
+        /// <param name="target">Объект, метод которого нужно вызвать.</param>
+        /// <param name="methodName">Имя метода для вызова</param>
+        /// <param name="arguments">Массив аргументов, передаваемых методу. Следует учесть, что все параметры нужно передавать явно, в том числе необязательные.</param>
+        /// <returns>Если вызывается функция, то возвращается ее результат. В противном случае возвращается Неопределено.</returns>
+        [ContextMethod("ВызватьМетод", "CallMethod")]
+        public IValue CallMethod(IBslProcess process, IRuntimeContextInstance target, string methodName, ArrayImpl arguments = null)
+        {
+            var methodIdx = target.GetMethodNumber(methodName);
+            var methInfo = target.GetMethodInfo(methodIdx);
+
+            IValue[] argsToPass;
+            if (target.DynamicMethodSignatures)
+                argsToPass = arguments?.ToArray() ?? Array.Empty<IValue>();
+            else
+                argsToPass = GetArgsToPass(arguments, methInfo.GetBslParameters());
+
+            IValue retValue = ValueFactory.Create();
+            if (methInfo.IsFunction())
+            {
+                target.CallAsFunction(methodIdx, argsToPass, out retValue, process);
+            }
+            else
+            {
+                target.CallAsProcedure(methodIdx, argsToPass, process);
+            }
+
+            if (arguments != null)
+            {
+                for (int i = 0; i < argsToPass.Length; i++)
+                {
+                    if (i < arguments.Count())
+                    {
+                        arguments.Set(i, argsToPass[i] is IValueReference r ? r.Value : argsToPass[i]);
+                    }
+                }
+            }
+
+            return retValue;
+        }
+
+        private static IValue[] GetArgsToPass(ArrayImpl arguments, ParameterInfo[] parameters)
+        {
+            var argValues = arguments?.ToArray() ?? Array.Empty<IValue>();
+            // ArrayImpl не может (не должен!) содержать null или NotAValidValue
+
+            if (argValues.Length > parameters.Length)
+                throw RuntimeException.TooManyArgumentsPassed();
+
+            var argsToPass = new IValue[parameters.Length];
+
+            int i = 0;
+            for (; i < argValues.Length; i++)
+            {
+                if (parameters[i].IsByRef())
+                    argsToPass[i] = Variable.Create(argValues[i], "");
+                else
+                    argsToPass[i] = argValues[i];
+            }
+            for (; i < parameters.Length; i++)
+            {
+                if (!parameters[i].HasDefaultValue)
+                    throw RuntimeException.TooFewArgumentsPassed();
+
+                // else keep null as a default value
+            }
+
+            return argsToPass;
+        }
+
+        /// <summary>
+        /// Проверяет существование указанного метода у переданного объекта.
+        /// </summary>
+        /// <param name="target">Объект, из которого получаем таблицу методов.</param>
+        /// <param name="methodName">Имя метода для вызова</param>
+        /// <returns>Истина, если метод существует, и Ложь в обратном случае. </returns>
+        [ContextMethod("МетодСуществует", "MethodExists")]
+        public bool MethodExists(BslValue target, string methodName)
+        {
+            if (target is BslObjectValue)
+                return MethodExistsForObject(target.AsObject(), methodName);
+
+            if (target.SystemType == BasicTypes.Type)
+                return MethodExistsForType(target as BslTypeValue, methodName);
+
+            throw RuntimeException.InvalidArgumentType("target");
+        }
+
+        private static bool MethodExistsForObject(IRuntimeContextInstance target, string methodName)
+        {
+            try
+            {
+                var idx = target.GetMethodNumber(methodName);
+                return idx >= 0;
+            }
+            catch (RuntimeException)
+            {
+                return false;
+            }
+        }
+
+
+        private const int annotNameColumnIndex = 0;
+        private const int annotParamsColumnIndex = 1;
+        private static ValueTable EmptyAnnotationsTable()
+        {
+            var annotationsTable = new ValueTable();
+            annotationsTable.Columns.AddUnchecked("Имя");
+            annotationsTable.Columns.AddUnchecked("Параметры");
+
+            return annotationsTable;
+        }
+
+        private static ValueTable CreateAnnotationTable(BslAnnotationAttribute[] annotations)
+        {
+            var annotationsTable = EmptyAnnotationsTable();
+            var annotationNameColumn = annotationsTable.Columns.FindColumnByIndex(annotNameColumnIndex);
+            var annotationParamsColumn = annotationsTable.Columns.FindColumnByIndex(annotParamsColumnIndex);
+
+            foreach (var annotation in annotations)
+            {
+                var annotationRow = annotationsTable.Add();
+                if (annotation.Name != null)
+                {
+                    annotationRow.Set(annotationNameColumn, ValueFactory.Create(annotation.Name));
+                }
+                var parametersTable = FillAnnotationParameters(annotation.Parameters);
+                annotationRow.Set(annotationParamsColumn, parametersTable);
+            }
+
+            return annotationsTable;
+        }
+
+        private static ValueTable FillAnnotationParameters(IEnumerable<BslAnnotationParameter> parameters)
+        {
+            var parametersTable = new ValueTable();
+            var parameterNameColumn = parametersTable.Columns.Add("Имя");
+            var parameterValueColumn = parametersTable.Columns.Add("Значение");
+
+            foreach (var annotationParameter in parameters)
+            {
+                var parameterRow = parametersTable.Add();
+                if (annotationParameter.Name != null)
+                {
+                    parameterRow.Set(parameterNameColumn, ValueFactory.Create(annotationParameter.Name));
+                }
+                if (annotationParameter.Value is BslAnnotationValue annotationValue)
+                {
+                    var expandedValue = EmptyAnnotationsTable();
+                    var expandedValueColumns = expandedValue.Columns;
+                    var row = expandedValue.Add();
+                    row.Set(expandedValueColumns.FindColumnByIndex(annotNameColumnIndex), ValueFactory.Create(annotationValue.Name));
+                    row.Set(expandedValueColumns.FindColumnByIndex(annotParamsColumnIndex), FillAnnotationParameters(annotationValue.Parameters));
+                    parameterRow.Set(parameterValueColumn, row);
+                }
+                else
+                {
+                    parameterRow.Set(parameterValueColumn, annotationParameter.Value);
+                }
+            }
+
+            return parametersTable;
+        }
+
+        private static bool MethodExistsForType(BslTypeValue type, string methodName)
+        {
+            var clrType = GetReflectableClrType(type);
+            return clrType.GetMethod(methodName) != null;
+        }
+
+        private static Type GetReflectableClrType(BslTypeValue type)
+        {
+            var clrType = type.TypeValue.ImplementingClass;
+            if (clrType != typeof(AttachedScriptsFactory) && !typeof(IRuntimeContextInstance).IsAssignableFrom(clrType))
+            {
+                throw NonReflectableType();
+            }
+
+            Type reflectableType;
+            if (clrType == typeof(AttachedScriptsFactory))
+                reflectableType = ReflectUserType(type.TypeValue.Name);
+            else
+                reflectableType = ReflectContext(clrType);
+
+            return reflectableType;
+        }
+
+        private static RuntimeException NonReflectableType()
+        {
+            return RuntimeException.InvalidArgumentValue("Тип не может быть отражен.");
+        }
+
+        /// <summary>
+        /// Получает таблицу методов для переданного объекта.
+        /// </summary>
+        /// <param name="target">Объект, из которого получаем таблицу методов.</param>
+        /// <returns>Таблица значений с колонками: Имя, Количество, ЭтоФункция, Аннотации, Параметры, Экспорт</returns>
+        [ContextMethod("ПолучитьТаблицуМетодов", "GetMethodsTable")]
+        public ValueTable GetMethodsTable(BslValue target)
+        {
+            var result = new ValueTable();
+            if (target is BslObjectValue)
+                FillMethodsTableForObject(target.AsObject(), result);
+            else if (target.SystemType == BasicTypes.Type)
+                FillMethodsTableForType(target as BslTypeValue, result);
+            else
+                throw RuntimeException.InvalidArgumentType();
+
+            return result;
+        }
+
+        private static void FillMethodsTableForObject(IRuntimeContextInstance target, ValueTable result)
+        {
+            FillMethodsTable(result, target.GetMethods());
+        }
+
+        private static void FillMethodsTableForType(BslTypeValue type, ValueTable result)
+        {
+            var clrType = GetReflectableClrType(type);
+            var clrMethods = clrType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            FillMethodsTable(result, clrMethods.Cast<BslMethodInfo>());
+        }
+
+        private void FillPropertiesTableForObject(ValueTable result, IValue target, bool withPrivate)
+        {
+            if (target is ScriptDrivenObject scriptObject)
+            {
+                var fieldsQuery = scriptObject.Module.Fields.Cast<BslScriptFieldInfo>();
+
+                if (!withPrivate)
+                {
+                    fieldsQuery = fieldsQuery.Where(x => x.IsPublic);
+                }
+
+                var fields = fieldsQuery.Select(field => BslPropertyBuilder.Create()
+                            .Name(field.Name)
+                            .IsExported(field.IsPublic)
+                            .SetAnnotations(field.GetAnnotations())
+                            .SetDispatchingIndex(field.DispatchId)
+                            .Build()
+                        )
+                    .OrderBy(p => p.DispatchId)
+                    .ToArray();
+
+                var fieldNames = fields.Select(x => x.Name)
+                    .ToHashSet();
+
+                var properties = scriptObject.GetProperties()
+                    .Where(prop => !fieldNames.Contains(prop.Name));
+
+                if (!withPrivate)
+                {
+                    properties = properties.OfType<BslScriptPropertyInfo>()
+                        .Where(p => p.IsExported);
+                }
+
+                FillPropertiesTable(result, properties.Concat(fields));
+            }
+            else
+            {
+                var objectProperties = target.AsObject().GetProperties();
+                FillPropertiesTable(result, objectProperties);
+            }
+        }
+
+        private static void FillPropertiesTableForType(BslTypeValue type, ValueTable result, bool withPrivate)
+        {
+            var clrType = GetReflectableClrType(type);
+            var nativeProps = clrType.GetProperties()
+                                     .Select(x => new
+                                     {
+                                         PropDef = x.GetCustomAttribute<ContextPropertyAttribute>(),
+                                         Prop = x
+                                     })
+                                     .Where(x => x.PropDef != null)
+                                     .Select(x => new ContextPropertyInfo(x.Prop));
+
+            var infos = new List<BslPropertyInfo>();
+
+            infos.AddRange(nativeProps);
+            int indices = infos.Count;
+
+            if (typeof(ScriptDrivenObject).IsAssignableFrom(clrType.BaseType))
+            {
+                var flags = BindingFlags.Instance | BindingFlags.Public;
+                if (withPrivate)
+                    flags |= BindingFlags.NonPublic;
+
+                var nativeFields = clrType.GetFields(flags);
+                foreach (var field in nativeFields)
+                {
+                    var prop = BslPropertyBuilder.Create()
+                        .Name(field.Name)
+                        .IsExported(field.IsPublic)
+                        .SetDispatchingIndex(indices++)
+                        .SetAnnotations(field.GetAnnotations())
+                        .Build();
+
+                    infos.Add(prop);
+                }
+            }
+
+            FillPropertiesTable(result, infos);
+
+        }
+
+        private static void FillMethodsTable(ValueTable result, IEnumerable<BslMethodInfo> methods)
+        {
+            var nameColumn = result.Columns.AddUnchecked("Имя");
+            var countColumn = result.Columns.AddUnchecked("КоличествоПараметров", "Количество параметров");
+            var isFunctionColumn = result.Columns.AddUnchecked("ЭтоФункция", "Это функция");
+            var annotationsColumn = result.Columns.AddUnchecked("Аннотации");
+            var paramsColumn = result.Columns.AddUnchecked("Параметры");
+            var isExportlColumn = result.Columns.AddUnchecked("Экспорт");
+
+            foreach (var methInfo in methods)
+            {
+                var annotations = methInfo.GetAnnotations();
+                var parameters = methInfo.GetBslParameters();
+
+                ValueTableRow new_row = result.Add();
+                new_row.Set(nameColumn, ValueFactory.Create(methInfo.Name));
+                new_row.Set(countColumn, ValueFactory.Create(parameters.Length));
+                new_row.Set(isFunctionColumn, ValueFactory.Create(methInfo.IsFunction()));
+                new_row.Set(isExportlColumn, ValueFactory.Create(methInfo.IsPublic));
+
+                new_row.Set(annotationsColumn, CreateAnnotationTable(annotations));
+
+                var paramTable = new ValueTable();
+                var paramNameColumn = paramTable.Columns.AddUnchecked("Имя");
+                var paramByValue = paramTable.Columns.AddUnchecked("ПоЗначению", "По значению");
+                var paramHasDefaultValue = paramTable.Columns.AddUnchecked("ЕстьЗначениеПоУмолчанию", "Есть значение по-умолчанию");
+                var paramDefaultValue = paramTable.Columns.AddUnchecked("ЗначениеПоУмолчанию", "Значение по умолчанию");
+                var paramAnnotationsColumn = paramTable.Columns.AddUnchecked("Аннотации");
+                new_row.Set(paramsColumn, paramTable);
+
+                if (parameters.Length != 0)
+                {
+                    var index = 0;
+                    foreach (var param in parameters)
+                    {
+                        var name = param.Name ?? $"param{++index}";
+                        var paramRow = paramTable.Add();
+                        paramRow.Set(paramNameColumn, ValueFactory.Create(name));
+                        paramRow.Set(paramByValue, ValueFactory.Create(!param.IsByRef()));
+                        paramRow.Set(paramHasDefaultValue, ValueFactory.Create(param.HasDefaultValue));
+                        paramRow.Set(paramDefaultValue, param.DefaultValue as IValue);
+                        paramRow.Set(paramAnnotationsColumn, CreateAnnotationTable(param.GetAnnotations()));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Получает таблицу свойств для переданного объекта.
+        /// </summary>
+        /// <param name="target">Объект, из которого получаем таблицу свойств.</param>
+        /// <param name="withPrivate">Включить в результат приватные поля</param>
+        /// <returns>Таблица значений с колонками - Имя, Аннотации, Экспорт</returns>
+        [ContextMethod("ПолучитьТаблицуСвойств", "GetPropertiesTable")]
+        public ValueTable GetPropertiesTable(BslValue target, bool withPrivate = false)
+        {
+            var result = new ValueTable();
+
+            if (target is BslObjectValue)
+                FillPropertiesTableForObject(result, target, withPrivate);
+            else if (target.SystemType == BasicTypes.Type)
+            {
+                var type = target as BslTypeValue;
+                FillPropertiesTableForType(type, result, withPrivate);
+            }
+            else
+                throw RuntimeException.InvalidArgumentType();
+
+            return result;
+        }
+
+        /// <summary>
+        /// Получает свойство по его имени.
+        /// </summary>
+        /// <param name="target">Объект, свойство которого необходимо установить.</param>
+        /// <param name="prop">Имя свойства</param>
+        /// <returns>Значение свойства</returns>
+        [ContextMethod("ПолучитьСвойство", "GetProperty")]
+        public IValue GetProperty(IRuntimeContextInstance target, string prop)
+        {
+            int propIdx;
+            if (target is ScriptDrivenObject script)
+                propIdx = script.FindAnyProperty(prop);
+            else
+                propIdx = target.GetPropertyNumber(prop);
+            return target.GetPropValue(propIdx);
+        }
+
+        /// <summary>
+        /// Устанавливает свойство по его имени.
+        /// </summary>
+        /// <param name="target">Объект, свойство которого необходимо установить.</param>
+        /// <param name="prop">Имя свойства</param>
+        /// <param name="value">Значение свойства.</param>
+        [ContextMethod("УстановитьСвойство", "SetProperty")]
+        public void SetProperty(IRuntimeContextInstance target, string prop, IValue value)
+        {
+            int propIdx;
+            if (target is ScriptDrivenObject script)
+                propIdx = script.FindAnyProperty(prop);
+            else
+                propIdx = target.GetPropertyNumber(prop);
+
+            if (target.IsPropWritable(propIdx))
+                target.SetPropValue(propIdx, value);
+            else
+                throw PropertyAccessException.PropIsNotWritableException(prop);
+        }
+
+        private static void FillPropertiesTable(ValueTable result, IEnumerable<BslPropertyInfo> properties)
+        {
+            var nameColumn = result.Columns.AddUnchecked("Имя");
+            var annotationsColumn = result.Columns.AddUnchecked("Аннотации");
+            var isExportedColumn = result.Columns.AddUnchecked("Экспорт");
+
+            var systemVarNames = new string[] { "этотобъект", "thisobject" };
+
+            foreach (var propInfo in properties)
+            {
+                if (systemVarNames.Contains(propInfo.Name.ToLower())) continue;
+
+                ValueTableRow new_row = result.Add();
+                new_row.Set(nameColumn, ValueFactory.Create(propInfo.Name));
+
+                var annotations = propInfo.GetAnnotations();
+                new_row.Set(annotationsColumn, annotations.Length != 0 ? CreateAnnotationTable(annotations) : EmptyAnnotationsTable());
+
+                if (propInfo is BslScriptPropertyInfo scriptProp)
+                {
+                    new_row.Set(isExportedColumn, BslBooleanValue.Create(scriptProp.IsExported));
+                }
+                else
+                {
+                    new_row.Set(isExportedColumn, BslBooleanValue.Create(propInfo.CanRead));
+                }
+            }
+        }
+
+        public static Type ReflectUserType(string typeName)
+        {
+            IExecutableModule module;
+            try
+            {
+                module = AttachedScriptsFactory.GetModuleOfType(typeName);
+            }
+            catch (KeyNotFoundException)
+            {
+                throw NonReflectableType();
+            }
+
+            var builder = new ClassBuilder(typeof(UserScriptContextInstance));
+
+            return builder
+                   .SetTypeName(typeName)
+                   .SetModule(module)
+                   .ExportDefaults()
+                   .Build();
+        }
+
+        public static Type ReflectContext(Type clrType)
+        {
+            var attrib = clrType.GetCustomAttribute<ContextClassAttribute>();
+            if (attrib == null || !typeof(ContextIValueImpl).IsAssignableFrom(clrType))
+                throw NonReflectableType();
+
+            var builder = new ClassBuilder(clrType);
+
+            return builder.SetTypeName(attrib.Name)
+                   .ExportDefaults()
+                   .Build();
+        }
+
+        /// <summary>
+        /// Возвращает все известные типы
+        /// </summary>
+        /// <param name="filter">Структура - Условия поиска. Ключ - имя колонки, значение - искомое значение </param>
+        /// <returns>
+        ///  ТаблицаЗначений:
+        ///    * Имя - Строка - Имя типа
+        ///    * Значение - Тип - Тип
+        ///    * Примитивный - Булево - Это примитивный тип 
+        ///    * Пользовательский - Булево - Это пользовательский типа
+        ///    * Коллекция - Булево - Это коллекция
+        /// </returns>
+        [ContextMethod("ИзвестныеТипы", "KnownTypes")]
+        public ValueTable KnownTypes(StructureImpl filter = default)
+        {
+            var result = new ValueTable();
+
+            var nameColumn = result.Columns.AddUnchecked("Имя");
+            var valueColumn = result.Columns.AddUnchecked("Значение");
+            var primitiveColumn = result.Columns.AddUnchecked("Примитивный");
+            var userColumn = result.Columns.AddUnchecked("Пользовательский");
+            var collectionColumn = result.Columns.AddUnchecked("Коллекция");
+
+            _typeManager.RegisteredTypes().ForEach(descriptor =>
+            {
+                var row = result.Add();
+
+                row.Set(nameColumn, ValueFactory.Create(descriptor.ToString()));
+                row.Set(valueColumn, new BslTypeValue(descriptor));
+                row.Set(primitiveColumn, ValueFactory.Create(descriptor.ImplementingClass.IsSubclassOf(typeof(BslPrimitiveValue))));
+                row.Set(userColumn, ValueFactory.Create(descriptor.ImplementingClass == typeof(AttachedScriptsFactory)));
+                row.Set(collectionColumn, ValueFactory.Create(
+                    descriptor.ImplementingClass.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ICollectionContext<>))
+                ));
+            });
+
+            if (filter != default)
+            {
+                result = result.Copy(filter);
+            }
+
+            return result;
+        }
+
+        [ScriptConstructor]
+        public static ReflectorContext CreateNew(TypeActivationContext context)
+        {
+            return new ReflectorContext(context.TypeManager);
+        }
+    }
+}

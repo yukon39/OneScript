@@ -4,24 +4,31 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
-using ScriptEngine.Environment;
+
 using ScriptEngine.Machine;
 using ScriptEngine.Machine.Contexts;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using OneScript.Commons;
+using OneScript.Compilation;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Values;
+using ScriptEngine.Libraries;
 
 namespace ScriptEngine.HostedScript
 {
-    public class LibraryLoader : ScriptDrivenObject
+    public class LibraryLoader : AutoScriptDrivenObject<LibraryLoader>
     {
-        private readonly RuntimeEnvironment _env;
+        private readonly IRuntimeEnvironment _env;
+        private readonly ILibraryManager _libManager;
         private readonly ScriptingEngine _engine;
 
-        readonly bool _customized;
-
-        readonly List<DelayLoadedScriptData> _delayLoadedScripts = new List<DelayLoadedScriptData>();
+        private readonly bool _customized;
+        private readonly Stack<LibraryLoadingContext> _librariesInProgress = new Stack<LibraryLoadingContext>();
 
         private struct DelayLoadedScriptData
         {
@@ -29,50 +36,56 @@ namespace ScriptEngine.HostedScript
             public string identifier;
             public bool asClass;
         }
+
+        private class LibraryLoadingContext
+        {
+            public LibraryLoadingContext(ExternalLibraryInfo library)
+            {
+                this.Library = library;
+            }
+
+            public readonly ExternalLibraryInfo Library;
+            public readonly List<DelayLoadedScriptData> delayLoadedScripts = new List<DelayLoadedScriptData>();
+        }
         
-        private LibraryLoader(LoadedModule moduleHandle, RuntimeEnvironment env, ScriptingEngine engine): base(moduleHandle)
+        private LibraryLoader(IExecutableModule moduleHandle,
+            IRuntimeEnvironment env,
+            ILibraryManager libManager,
+            ScriptingEngine engine, IBslProcess process): base(moduleHandle)
         {
             _env = env;
+            _libManager = libManager;
             _engine = engine;
             _customized = true;
-
-            _engine.InitializeSDO(this);
+            
+            _engine.InitializeSDO(this, process);
 
         }
 
-        private LibraryLoader(RuntimeEnvironment env, ScriptingEngine engine)
+        private LibraryLoader(IRuntimeEnvironment env,
+            ILibraryManager libManager,
+            ScriptingEngine engine)
         {
             _env = env;
+            _libManager = libManager;
             _engine = engine;
             _customized = false;
         }
         
         #region Static part
-
-        private static readonly ContextMethodsMapper<LibraryLoader> _methods = new ContextMethodsMapper<LibraryLoader>();
-
-        public static LibraryLoader Create(ScriptingEngine engine, RuntimeEnvironment env, string processingScript)
+        
+        public static LibraryLoader Create(ScriptingEngine engine, string processingScript, IBslProcess process)
         {
-            var code = engine.Loader.FromFile(processingScript);
             var compiler = engine.GetCompilerService();
-            compiler.DefineVariable("ЭтотОбъект", "ThisObject", SymbolType.ContextProperty);
+            var code = engine.Loader.FromFile(processingScript);
+            var module = CompileModule(compiler, code, typeof(LibraryLoader), process);
             
-            for (int i = 0; i < _methods.Count; i++)
-            {
-                var mi = _methods.GetMethodInfo(i);
-                compiler.DefineMethod(mi);
-            }
-
-            var module = compiler.Compile(code);
-            var loadedModule = engine.LoadModuleImage(module);
-
-            return new LibraryLoader(loadedModule, env, engine);
-
+            return new LibraryLoader(module, engine.Environment, engine.LibraryManager, engine, process);
         }
 
-        public static LibraryLoader Create(ScriptingEngine engine, RuntimeEnvironment env)
+        public static LibraryLoader Create(ScriptingEngine engine, IBslProcess process)
         {
-            return new LibraryLoader(env, engine);
+            return new LibraryLoader(engine.Environment, engine.LibraryManager, engine);
         }
 
         #endregion
@@ -83,7 +96,7 @@ namespace ScriptEngine.HostedScript
             if (!Utils.IsValidIdentifier(className))
                 throw RuntimeException.InvalidArgumentValue();
 
-            _delayLoadedScripts.Add(new DelayLoadedScriptData()
+            _librariesInProgress.Peek().delayLoadedScripts.Add(new DelayLoadedScriptData()
                 {
                     path = file,
                     identifier = className,
@@ -92,12 +105,12 @@ namespace ScriptEngine.HostedScript
         }
 
         [ContextMethod("ДобавитьМодуль", "AddModule")]
-        public void AddModule(string file, string moduleName)
+        public void AddModule(IBslProcess process, string file, string moduleName)
         {
             if (!Utils.IsValidIdentifier(moduleName))
                 throw RuntimeException.InvalidArgumentValue();
 
-            _delayLoadedScripts.Add(new DelayLoadedScriptData()
+            _librariesInProgress.Peek().delayLoadedScripts.Add(new DelayLoadedScriptData()
             {
                 path = file,
                 identifier = moduleName,
@@ -106,111 +119,76 @@ namespace ScriptEngine.HostedScript
 
             try
             {
-                _env.InjectGlobalProperty(null, moduleName, true);
+                TraceLoadLibrary(
+                    Locale.NStr($"ru = 'Загружаю модуль ={moduleName}= в область видимости из файла {file}';"+
+                                $"en = 'Load module ={moduleName}= in to context from file {file}'")    
+                );
+                
+                _env.InjectGlobalProperty(BslUndefinedValue.Instance, moduleName, _librariesInProgress.Peek().Library.Package);
             }
             catch (InvalidOperationException e)
 	        {
                 // символ уже определен
-                throw new RuntimeException(String.Format("Невозможно загрузить модуль {0}. Такой символ уже определен.", moduleName), e);
+                throw new RuntimeException($"Невозможно загрузить модуль {moduleName}. Такой символ уже определен.", e);
             }
         }
 
         [ContextMethod("ЗагрузитьБиблиотеку", "LoadLibrary")]
         public void LoadLibrary(string dllPath)
         {
-            var assembly = System.Reflection.Assembly.LoadFrom(dllPath);
-            _engine.AttachAssembly(assembly, _env);
+            var context = new ComponentLoadingContext(dllPath);
+            var assembly = context.LoadFromAssemblyPath(dllPath);
+            _engine.AttachExternalAssembly(assembly, _env);
         }
 
-        protected override int GetOwnVariableCount()
+        [ContextMethod("ДобавитьМакет", "AddTemplate")]
+        public void AddTemplate(string file, string name, TemplateKind kind = TemplateKind.File)
         {
-            return 1;
+            var manager = _engine.GlobalsManager.GetInstance<TemplateStorage>();
+            manager.RegisterTemplate(file, name, kind);
         }
 
-        protected override int FindOwnProperty(string name)
+        public PackageInfo ProcessLibrary(string libraryPath, IBslProcess process)
         {
-            if(StringComparer.OrdinalIgnoreCase.Compare(name, "ЭтотОбъект") == 0)
+            var package = new PackageInfo(libraryPath, Path.GetFileName(libraryPath));
+            var library = new ExternalLibraryInfo(package);
+            _librariesInProgress.Push(new LibraryLoadingContext(library));
+            try
             {
-                return 0;
-            }
-            if(StringComparer.OrdinalIgnoreCase.Compare(name, "ThisObject") == 0)
-            {
-                return 0;
-            }
+                bool success;
+                if(!_customized)
+                {
+                    TraceLoadLibrary(
+                        Locale.NStr($"ru = 'Использую НЕ кастомизированный загрузчик пакетов по умолчанию для библиотеки {libraryPath}';"+
+                                    $"en = 'Use NOT customized package loader for library {libraryPath}'")    
+                    );
 
-            return base.FindOwnProperty(name);
-        }
+                    success = DefaultProcessing(libraryPath, process);
+                }
+                else
+                {
+                    TraceLoadLibrary(
+                        Locale.NStr($"ru = 'Использую КАСТОМИЗИРОВАННЫЙ загрузчик пакетов для библиотеки {libraryPath}';"+
+                                    $"en = 'Use CUSTOMIZED package loader for library {libraryPath}'")
+                    );
 
-        protected override string GetOwnPropName(int index)
-        {
-            if (index == 0)
-                return "ЭтотОбъект";
+                    success = CustomizedProcessing(libraryPath, process);
+                }
 
-            throw new ArgumentException();
-        }
-
-        protected override bool IsOwnPropReadable(int index)
-        {
-            return true;
-        }
-
-        protected override IValue GetOwnPropValue(int index)
-        {
-            if (index == 0)
-                return this;
-            else
-                throw new ArgumentException(String.Format("Неверный индекс свойства {0}", index), "index");
-        }
-
-        protected override int GetOwnMethodCount()
-        {
-            return _methods.Count;
-        }
-
-        protected override void UpdateState()
-        {
+                if (!success)
+                    return default;
             
-        }
-
-        protected override int FindOwnMethod(string name)
-        {
-            return _methods.FindMethod(name);
-        }
-
-        protected override MethodInfo GetOwnMethod(int index)
-        {
-            return _methods.GetMethodInfo(index);
-        }
-
-        protected override void CallOwnProcedure(int index, IValue[] arguments)
-        {
-            _methods.GetMethod(index)(this, arguments);
-        }
-
-        protected override IValue CallOwnFunction(int index, IValue[] arguments)
-        {
-            return _methods.GetMethod(index)(this, arguments);
-        }
-
-        public bool ProcessLibrary(string libraryPath)
-        {
-            bool success;
-            if(!_customized)
-            {
-                success = DefaultProcessing(libraryPath);
+                CompileDelayedModules(library, process);
+                
+                return package;
             }
-            else
+            finally
             {
-                success = CustomizedProcessing(libraryPath);
+                _librariesInProgress.Pop();
             }
-
-            if(success)
-                CompileDelayedModules();
-
-            return success;
         }
 
-        private bool CustomizedProcessing(string libraryPath)
+        private bool CustomizedProcessing(string libraryPath, IBslProcess process)
         {
             var libPathValue = ValueFactory.Create(libraryPath);
             var defaultLoading = Variable.Create(ValueFactory.Create(true), "$internalDefaultLoading");
@@ -219,63 +197,97 @@ namespace ScriptEngine.HostedScript
             int eventIdx = GetScriptMethod("ПриЗагрузкеБиблиотеки", "OnLibraryLoad");
             if(eventIdx == -1)
             {
-                return DefaultProcessing(libraryPath);
+                return DefaultProcessing(libraryPath, process);
             }
 
-            CallScriptMethod(eventIdx, new[] { libPathValue, defaultLoading, cancelLoading });
+            CallScriptMethod(eventIdx, new[] { libPathValue, defaultLoading, cancelLoading }, process);
 
             if (cancelLoading.AsBoolean()) // Отказ = Ложь
                 return false;
 
             if (defaultLoading.AsBoolean())
-                return DefaultProcessing(libraryPath);
+                return DefaultProcessing(libraryPath, process);
 
             return true;
 
         }
 
-        private bool DefaultProcessing(string libraryPath)
+        private bool DefaultProcessing(string libraryPath, IBslProcess process)
         {
             var files = Directory.EnumerateFiles(libraryPath, "*.os")
                 .Select(x => new { Name = Path.GetFileNameWithoutExtension(x), Path = x })
-                .Where(x => Utils.IsValidIdentifier(x.Name));
+                .Where(x => Utils.IsValidIdentifier(x.Name))
+                .ToList();
 
             bool hasFiles = false;
 
+            TraceLoadLibrary(
+                Locale.NStr($"ru = 'Обнаружено {files.Count} модулей в библиотеке {libraryPath}';"+
+                            $"en = 'Found {files.Count} modules in library {libraryPath}'")    
+            );
+
             foreach (var file in files)
             {
+                TraceLoadLibrary(
+                    Locale.NStr($"ru = 'Загружаю модуль библиотеки из {file.Path}';"+
+                                $"en = 'Load library module from {file.Path}'")    
+                );
                 hasFiles = true;
-                AddModule(file.Path, file.Name);
+                AddModule(process, file.Path, file.Name);
             }
 
             return hasFiles;
         }
 
-        private void CompileDelayedModules()
+        private void CompileDelayedModules(ExternalLibraryInfo library, IBslProcess process)
         {
-            var ordered = _delayLoadedScripts.OrderBy(x => x.asClass ? 1 : 0).ToArray();
-            _delayLoadedScripts.Clear();
-
-            foreach (var script in ordered)
+            foreach (var scriptFile in _librariesInProgress.Peek().delayLoadedScripts)
             {
-                var compiler = _engine.GetCompilerService();
-
-                var source = _engine.Loader.FromFile(script.path);
-                var module = _engine.AttachedScriptsFactory.CompileModuleFromSource(compiler, source, null);
-
-                if(script.asClass)
+                if (scriptFile.asClass)
                 {
-                    _engine.AttachedScriptsFactory.LoadAndRegister(script.identifier, module);
-                    _env.NotifyClassAdded(module, script.identifier);
+                    library.AddClass(scriptFile.identifier, scriptFile.path);
                 }
                 else
-                {                    
-                    _env.NotifyModuleAdded(module, script.identifier);
+                {
+                    library.AddModule(scriptFile.identifier, scriptFile.path);
                 }
             }
 
-            _engine.CompileEnvironmentModules(_env);
+            foreach (var moduleFile in library.Modules)
+            {
+                moduleFile.Module = CompileFile(moduleFile.FilePath, library.Package.Id, process);
+            }
+            
+            foreach (var classFile in library.Classes)
+            {
+                var module = CompileFile(classFile.FilePath, library.Package.Id, process);
+                _engine.AttachedScriptsFactory.RegisterTypeModule(classFile.Symbol, module);
+                classFile.Module = module;
+            }
 
+            _libManager.InitExternalLibrary(_engine, library, process);
+        }
+
+        private IExecutableModule CompileFile(string path, string ownerPackageId, IBslProcess process)
+        {
+            var compiler = _engine.GetCompilerService();
+            
+            var source = _engine.Loader.FromFile(path, ownerPackageId);
+            var module = _engine.AttachedScriptsFactory.CompileModuleFromSource(compiler, source, null, process);
+
+            return module;
+        }
+
+        private static Lazy<bool> TraceEnabled =
+            new Lazy<bool>(() => 
+                System.Environment.GetEnvironmentVariable("OS_LIBRARY_LOADER_TRACE") == "1" ||
+                System.Environment.GetEnvironmentVariable("OS_LRE_TRACE") == "1");  // для обратной совместимости
+
+        public static void TraceLoadLibrary(string message)
+        {
+            if (TraceEnabled.Value) {
+                SystemLogger.Write("LRE: " + message);
+            }
         }
     }
 }

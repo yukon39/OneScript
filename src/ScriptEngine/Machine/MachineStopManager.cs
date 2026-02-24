@@ -4,12 +4,10 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
-using ScriptEngine.Environment;
+using System;
+using System.Linq;
+using ScriptEngine.Machine.Debugger;
 
 namespace ScriptEngine.Machine
 {
@@ -22,8 +20,6 @@ namespace ScriptEngine.Machine
         SteppingOut
     }
 
-    
-
     internal class MachineStopManager
     {
         private struct StopPoint
@@ -33,43 +29,39 @@ namespace ScriptEngine.Machine
         }
 
         private DebugState _currentState = DebugState.Running;
-        private readonly Breakpoints _breakpoints = new Breakpoints();
+        private readonly IBreakpointManager _breakpoints;
         private readonly MachineInstance _machine;
+        private readonly IThreadEventsListener _threadManager;
         private ExecutionFrame[] _stopFrames;
 
         private StopPoint _lastStopPoint;
-
-        public Breakpoints Breakpoints => _breakpoints;
         
+        public MachineStopManager(MachineInstance runner, IThreadEventsListener threadManager, IBreakpointManager breakpoints)
+        {
+            _machine = runner ?? throw new ArgumentNullException(nameof(runner));
+            _threadManager = threadManager;
+            _breakpoints = breakpoints ?? throw new ArgumentNullException(nameof(runner));
+        }
+        
+        public IBreakpointManager Breakpoints => _breakpoints;
         public MachineStopReason LastStopReason { get; internal set; }
-
+        public string LastStopErrorMessage { get; internal set; }
         public DebugState CurrentState => _currentState;
 
-        public int SetBreakpoint(string module, int line)
+        public void NotifyStop(MachineStopReason reason, string errMessage)
         {
-            return _breakpoints.SetBreakpoint(module, line);
+            _threadManager.ThreadStopped(_machine.Process.VirtualThreadId, reason, errMessage);
         }
-
-        internal int RemoveBreakpoint(string source, int line)
+        
+        public void NotifyStop()
         {
-            var id = _breakpoints.FindIndex(source, line);
-            if(id > 0)
-            {
-                _breakpoints.RemoveBreakpoint(id);
-            }
-
-            return id;
-
-        }
-
-        public MachineStopManager(MachineInstance runner)
-        {
-            _machine = runner;
+            _threadManager.ThreadStopped(_machine.Process.VirtualThreadId, LastStopReason, LastStopErrorMessage);
         }
         
         public bool ShouldStopAtThisLine(string module, ExecutionFrame currentFrame)
         {
             bool mustStop = false;
+
             switch (_currentState)
             {
                 case DebugState.Running:
@@ -92,13 +84,35 @@ namespace ScriptEngine.Machine
 
             if (mustStop)
             {
-                // здесь мы уже останавливались
+                // здесь мы уже останавливались?
                 if (_lastStopPoint.frame != currentFrame || _lastStopPoint.line != currentFrame.LineNumber)
                 {
                     if (_currentState == DebugState.Running)
+                    {
                         LastStopReason = MachineStopReason.Breakpoint;
+
+                        // Проверим существование условия остановки
+                        var condition = Breakpoints.GetCondition(module, currentFrame.LineNumber);
+
+                        if (!string.IsNullOrEmpty(condition))
+                        {
+                            try
+                            {
+                                mustStop = _machine.EvaluateInFrame(condition, currentFrame).AsBoolean();
+                            }
+                            catch (Exception ex)
+                            {
+                                // Остановим и сообщим, что остановка произошла не по условию, а в результате ошибки вычисления
+                                mustStop = true;
+                                LastStopReason = MachineStopReason.BreakpointConditionError;
+                                LastStopErrorMessage = $"Не удалось выполнить условие точки останова: {ex.Message}";
+                            }
+                        }
+                    }
                     else
+                    {
                         LastStopReason = MachineStopReason.Step;
+                    }
 
                     _lastStopPoint = new StopPoint()
                     {
@@ -119,7 +133,7 @@ namespace ScriptEngine.Machine
         
         private bool HitBreakpointOnLine(string module, ExecutionFrame currentFrame)
         {
-            return _breakpoints.Find(module, currentFrame.LineNumber);
+            return _breakpoints.FindBreakpoint(module, currentFrame.LineNumber);
         }
 
         private bool FrameIsInStopList(ExecutionFrame currentFrame)
@@ -127,12 +141,7 @@ namespace ScriptEngine.Machine
             return _stopFrames != null && _stopFrames.Contains(currentFrame);
         }
 
-        public void ClearBreakpoints()
-        {
-            _breakpoints.Clear();
-        }
-
-        public void StepOver(ExecutionFrame currentFrame)
+        public void StepOver()
         {
             _currentState = DebugState.SteppingOver;
             _stopFrames = _machine.GetExecutionFrames().Select(x => x.FrameObject).ToArray();
@@ -144,15 +153,10 @@ namespace ScriptEngine.Machine
             _currentState = DebugState.SteppingIn;
         }
 
-        internal void StepOut(ExecutionFrame currentFrame)
+        internal void StepOut()
         {
             _currentState = DebugState.SteppingOut;
             _stopFrames = _machine.GetExecutionFrames().Select(x => x.FrameObject).Skip(1).ToArray();
-        }
-
-        internal void Continue()
-        {
-            _lastStopPoint = default(StopPoint);
         }
     }
 }

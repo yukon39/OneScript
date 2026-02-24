@@ -1,0 +1,1445 @@
+/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the
+Mozilla Public License, v.2.0. If a copy of the MPL
+was not distributed with this file, You can obtain one
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using OneScript.Compilation;
+using OneScript.Compilation.Binding;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Language;
+using OneScript.Language.Extensions;
+using OneScript.Language.LexicalAnalysis;
+using OneScript.Language.SyntaxAnalysis;
+using OneScript.Language.SyntaxAnalysis.AstNodes;
+using OneScript.Localization;
+using OneScript.Sources;
+using OneScript.Values;
+using ScriptEngine.Machine;
+
+namespace ScriptEngine.Compiler
+{
+    public partial class StackMachineCodeGenerator : BslSyntaxWalker
+    {
+        private readonly IErrorSink _errorSink;
+        private readonly ExplicitImportsBehavior _importsOption;
+        private readonly StackRuntimeModule _module;
+        private SourceCode _sourceCode;
+        private SymbolTable _ctx;
+        private List<ConstDefinition> _constMap = new List<ConstDefinition>();
+        private HashSet<string> _localImports = new HashSet<string>();
+        
+        private readonly List<ForwardedMethodDecl> _forwardedMethods = new List<ForwardedMethodDecl>();
+        private readonly Stack<NestedLoopInfo> _nestedLoops = new Stack<NestedLoopInfo>();
+
+        private IBslProcess _compilerProcess;
+        
+        private HashSet<BslPropertyInfo> _reportedOldProperties = new HashSet<BslPropertyInfo>();
+
+        public StackMachineCodeGenerator(IErrorSink errorSink, ExplicitImportsBehavior importsOption)
+        {
+            _errorSink = errorSink;
+            _importsOption = importsOption;
+            _module = new StackRuntimeModule(typeof(IRuntimeContextInstance));
+        }
+        
+        public CodeGenerationFlags ProduceExtraCode { get; set; }
+
+        public IDependencyResolver DependencyResolver { get; set; }
+        
+        public StackRuntimeModule CreateModule(ModuleNode moduleNode, SourceCode source, SymbolTable context,
+            IBslProcess process)
+        {
+            if (moduleNode.Kind != NodeKind.Module)
+            {
+                throw new ArgumentException($"Node must be a Module node");
+            }
+
+            _ctx = context;
+            _sourceCode = source;
+            _compilerProcess = process;
+
+            return CreateImageInternal(moduleNode);
+        }
+
+        private StackRuntimeModule CreateImageInternal(ModuleNode moduleNode)
+        {
+            VisitModule(moduleNode);
+            CheckForwardedDeclarations();
+            
+            _module.Source = _sourceCode;
+            
+            return _module;
+        }
+
+        protected override void VisitModuleAnnotation(AnnotationNode node)
+        {
+            if (node.Kind == NodeKind.Import)
+                HandleImportClause(node);
+
+            var classAnnotation = new BslAnnotationAttribute(node.Name);
+            classAnnotation.SetParameters(GetAnnotationParameters(node));
+            _module.ModuleAttributes.Add(classAnnotation);
+        }
+
+        private void HandleImportClause(AnnotationNode node)
+        {
+            if(DependencyResolver == default)
+                return;
+            
+            var libName = node.Children
+                .Cast<AnnotationParameterNode>()
+                .First()
+                .Value
+                .Content;
+            
+            try
+            {
+                var resolvedLib = DependencyResolver.Resolve(_sourceCode, libName, _compilerProcess);
+                if (resolvedLib != null && _importsOption != ExplicitImportsBehavior.Disabled)
+                {
+                    _localImports.Add(resolvedLib.Id);
+                }
+            }
+            catch (DependencyResolveException e)
+            {
+                var error = new CodeError
+                {
+                    Description = e.Message,
+                    Position = MakeCodePosition(node.Location),
+                    ErrorId = nameof(CompilerException)
+                };
+                AddError(error);
+            }
+        }
+
+        private void CheckForwardedDeclarations()
+        {
+            if (_forwardedMethods.Count != 0)
+            {
+                foreach (var item in _forwardedMethods)
+                {
+                    if (!_ctx.TryFindMethodBinding(item.identifier, out var methN))
+                    {
+                        AddError(LocalizedErrors.SymbolNotFound(item.identifier), item.location);
+                        continue;
+                    }
+
+                    var scope = _ctx.GetScope(methN.ScopeNumber);
+
+                    var methInfo = scope.Methods[methN.MemberNumber].Method;
+                    Debug.Assert(StringComparer.OrdinalIgnoreCase.Compare(methInfo.Name, item.identifier) == 0);
+                    if (item.asFunction && !methInfo.IsFunction())
+                    {
+                        AddError(
+                            CompilerErrors.UseProcAsFunction(),
+                            item.location);
+                        continue;
+                    }
+
+                    CheckFactArguments(methInfo.GetParameters(), item.factArguments);
+                    CorrectCommandArgument(item.commandIndex, GetMethodRefNumber(methN));
+                }
+            }
+        }
+        
+        protected override void VisitModuleVariable(VariableDefinitionNode varNode)
+        {
+            var symbolicName = varNode.Name;
+            var annotations = GetAnnotations(varNode).ToList();
+
+            var varsCount = _ctx.GetScope(_ctx.ScopeCount - 1).Variables.Count;
+            var fieldBuilder = BslFieldBuilder.Create()
+                .Name(symbolicName)
+                .SetAnnotations(annotations)
+                .SetDispatchingIndex(varsCount)
+                .DeclaringType(_module.ClassType);
+            
+            if (varNode.IsExported)
+            {
+                fieldBuilder.IsExported(true);
+                var propertyView = BslPropertyBuilder.Create()
+                    .Name(symbolicName)
+                    .IsExported(true)
+                    .DeclaringType(_module.ClassType)
+                    .SetAnnotations(annotations)
+                    .SetDispatchingIndex(varsCount);
+                
+                _module.Properties.Add(propertyView.Build());
+            }
+
+            var field = fieldBuilder.Build();
+            _module.Fields.Add(field);
+            var binding = _ctx.DefineVariable(field.ToSymbol());
+            var descriptor = _ctx.GetBinding(binding.ScopeNumber);
+            var imageBinding = new ModuleSymbolBinding
+            {
+                Target = descriptor.Target,
+                MemberNumber = binding.MemberNumber,
+                Kind = descriptor.Kind,
+                ScopeIndex = descriptor.ScopeIndex
+            };
+            _module.VariableRefs.Add(imageBinding);
+        }
+
+        protected override void VisitModuleBody(BslSyntaxNode child)
+        {
+            if (child.Children.Count == 0)
+                return;
+
+            var entry = _module.Code.Count;
+            var localCtx = new SymbolScope();
+            _ctx.PushScope(localCtx, ScopeBindingDescriptor.ThisScope());
+
+            try
+            {
+                VisitCodeBlock(child.Children[0]);
+            }
+            catch
+            {
+                _ctx.PopScope();
+                throw;
+            }
+
+            _ctx.PopScope();
+            
+            var topIdx = _ctx.ScopeCount - 1;
+
+            if (entry != _module.Code.Count)
+            {
+                var methodInfo = NewMethod()
+                    .Name(IExecutableModule.BODY_METHOD_NAME)
+                    .DeclaringType(_module.ClassType)
+                    .SetDispatchingIndex(_module.Methods.Count)
+                    .Build();
+                
+                methodInfo.SetRuntimeParameters(entry, GetVariableNames(localCtx));
+                
+                var entryRefNumber = _module.MethodRefs.Count;
+                var descriptor = _ctx.GetBinding(topIdx);
+                var bodyBinding = new ModuleSymbolBinding
+                {
+                    Target = descriptor.Target,
+                    MemberNumber = _module.Methods.Count,
+                    Kind = descriptor.Kind,
+                    ScopeIndex = descriptor.ScopeIndex
+                };
+                
+                _module.Methods.Add(methodInfo);
+                _module.MethodRefs.Add(bodyBinding);
+                _module.EntryMethodIndex = entryRefNumber;
+            }
+        }
+
+        private static string[] GetVariableNames(SymbolScope localCtx)
+        {
+            return localCtx.Variables.Select(v => v.Name).ToArray();
+
+        }
+        
+        protected override void VisitGotoNode(NonTerminalNode node)
+        {
+            throw new NotSupportedException();
+        }
+
+        protected override void VisitLabelNode(LabelNode node)
+        {
+            throw new NotSupportedException();
+        }
+
+        protected override void VisitMethod(MethodNode methodNode)
+        {
+            if (methodNode.IsAsync)
+            {
+                AddError(LocalizedErrors.AsyncMethodsNotSupported(), methodNode.Location);
+            }
+            var signature = methodNode.Signature;
+            var methodBuilder = NewMethod();
+
+            methodBuilder.Name(signature.MethodName)
+                .ReturnType(signature.IsFunction ? typeof(BslValue) : typeof(void))
+                .IsExported(signature.IsExported)
+                .SetDispatchingIndex(_ctx.GetScope(_ctx.ScopeCount - 1).Methods.Count)
+                .SetAnnotations(GetAnnotationAttributes(methodNode));
+            
+            var methodCtx = new SymbolScope();
+            
+            foreach (var paramNode in signature.GetParameters())
+            {
+                var parameter = methodBuilder.NewParameter()
+                    .Name(paramNode.Name)
+                    .ByValue(paramNode.IsByValue)
+                    .SetAnnotations(GetAnnotationAttributes(paramNode));
+                
+                if (paramNode.HasDefaultValue)
+                {
+                    var constDef = CreateConstDefinition(paramNode.DefaultValue);
+                    var defValueIndex = GetConstNumber(constDef);
+                    
+                    parameter
+                        .DefaultValue(_module.Constants[defValueIndex])
+                        .CompileTimeBslConstant(defValueIndex);
+                }
+                
+                methodCtx.DefineVariable(new LocalVariableSymbol(paramNode.Name));
+            }
+            
+            _ctx.PushScope(methodCtx, ScopeBindingDescriptor.ThisScope());
+            var entryPoint = _module.Code.Count;
+            try
+            {
+                VisitMethodBody(methodNode);
+            }
+            finally
+            {
+                _ctx.PopScope();
+            }
+
+            var methodInfo = methodBuilder.Build();
+            methodInfo.SetRuntimeParameters(entryPoint, GetVariableNames(methodCtx));
+            
+            SymbolBinding binding;
+            try
+            {
+                binding = _ctx.DefineMethod(methodInfo.ToSymbol());
+            }
+            catch (CompilerException)
+            {
+                AddError(LocalizedErrors.DuplicateMethodDefinition(signature.MethodName), signature.Location);
+                binding = default;
+            }
+            var descriptor = _ctx.GetBinding(binding.ScopeNumber);
+            var imageBinding = new ModuleSymbolBinding
+            {
+                Target = descriptor.Target,
+                MemberNumber = binding.MemberNumber,
+                Kind = descriptor.Kind,
+                ScopeIndex = descriptor.ScopeIndex
+            };
+            _module.MethodRefs.Add(imageBinding);
+            _module.Methods.Add(methodInfo);
+        }
+
+        protected override void VisitMethodBody(MethodNode methodNode)
+        {
+            var codeStart = _module.Code.Count;
+            
+            foreach (var variableDefinition in methodNode.VariableDefinitions())
+            {
+                VisitMethodVariable(methodNode, variableDefinition);
+            }
+
+            VisitCodeBlock(methodNode.MethodBody);
+            
+            if (methodNode.Signature.IsFunction)
+            {
+                // неявный возврат Undefined
+                AddCommand(OperationCode.PushUndef);
+            }
+            
+            var codeEnd = _module.Code.Count;
+            
+            VisitBlockEnd(methodNode.EndLocation); // debug last line num
+            
+            AddCommand(OperationCode.Return);
+
+            // заменим Return на Jmp <сюда>
+            for (var i = codeStart; i < codeEnd; i++)
+            {
+                if (_module.Code[i].Code == OperationCode.Return)
+                {
+                    _module.Code[i] = new Command() { Code = OperationCode.Jmp, Argument = codeEnd };
+                }
+            }
+        }
+
+        protected override void VisitMethodVariable(MethodNode method, VariableDefinitionNode variableDefinition)
+        {
+            _ctx.DefineVariable(new LocalVariableSymbol(variableDefinition.Name));
+        }
+
+        protected override void VisitStatement(BslSyntaxNode statement)
+        {
+            if (statement.Kind != NodeKind.TryExcept 
+             && statement.Kind != NodeKind.WhileLoop)
+                AddLineNumber(statement.Location.LineNumber);
+
+            base.VisitStatement(statement);
+        }
+
+        protected override void VisitWhileNode(WhileLoopNode node)
+        {
+            var conditionIndex = AddLineNumber(node.Location.LineNumber);
+            var loopRecord = NestedLoopInfo.New();
+            loopRecord.startPoint = conditionIndex;
+            _nestedLoops.Push(loopRecord);
+            base.VisitExpression(node.Children[0]);
+            var jumpFalseIndex = AddCommand(OperationCode.JmpFalse, DUMMY_ADDRESS);
+            
+            VisitCodeBlock(node.Children[1]);
+            VisitBlockEnd(node.EndLocation);
+            
+            AddCommand(OperationCode.Jmp, conditionIndex);
+            var endLoop = AddCommand(OperationCode.Nop);
+            CorrectCommandArgument(jumpFalseIndex, endLoop);
+            CorrectBreakStatements(_nestedLoops.Pop(), endLoop);
+        }
+
+        protected override void VisitForEachLoopNode(ForEachLoopNode node)
+        {
+            VisitIteratorExpression(node.CollectionExpression);
+            AddCommand(OperationCode.PushIterator);
+            
+            var loopBegin = AddLineNumber(node.Location.LineNumber);
+            AddCommand(OperationCode.IteratorNext);
+            var condition = AddCommand(OperationCode.JmpFalse, DUMMY_ADDRESS);
+            
+            VisitIteratorLoopVariable(node.IteratorVariable);
+            
+            var loopRecord = NestedLoopInfo.New();
+            loopRecord.startPoint = loopBegin;
+            _nestedLoops.Push(loopRecord);
+            
+            VisitIteratorLoopBody(node.LoopBody);
+            VisitBlockEnd(node.EndLocation);
+            
+            AddCommand(OperationCode.Jmp, loopBegin);
+            
+            var indexLoopEnd = AddCommand(OperationCode.StopIterator);
+            CorrectCommandArgument(condition, indexLoopEnd);
+            CorrectBreakStatements(_nestedLoops.Pop(), indexLoopEnd);
+        }
+
+        protected override void VisitForLoopNode(ForLoopNode node)
+        {
+            var initializer = node.InitializationClause;
+            var counter = (TerminalNode) initializer.Children[0];
+            VisitExpression(initializer.Children[1]);
+            VisitVariableWrite(counter);
+            
+            VisitExpression(node.UpperLimitExpression);
+            
+            AddCommand(OperationCode.MakeRawValue);
+            AddCommand(OperationCode.PushTmp);
+
+            var jmpIndex = AddCommand(OperationCode.Jmp, DUMMY_ADDRESS);
+            var indexLoopBegin = AddLineNumber(node.Location.LineNumber);
+
+            // increment
+            VisitVariableRead(counter);
+            AddCommand(OperationCode.Inc);
+            VisitVariableWrite(counter);
+
+            var counterIndex = PushVariable(counter);
+            CorrectCommandArgument(jmpIndex, counterIndex);
+            var conditionIndex = AddCommand(OperationCode.JmpCounter, DUMMY_ADDRESS);
+
+            var loopRecord = NestedLoopInfo.New();
+            loopRecord.startPoint = indexLoopBegin;
+            _nestedLoops.Push(loopRecord);
+
+            VisitCodeBlock(node.LoopBody);
+            VisitBlockEnd(node.EndLocation);
+
+            // jmp to start
+            AddCommand(OperationCode.Jmp, indexLoopBegin);
+
+            var indexLoopEnd = AddCommand(OperationCode.PopTmp, 1);
+            CorrectCommandArgument(conditionIndex, indexLoopEnd);
+            CorrectBreakStatements(_nestedLoops.Pop(), indexLoopEnd);
+        }
+
+        protected override void VisitBreakNode(LineMarkerNode node)
+        {
+            ExitTryBlocks();
+            var loopInfo = _nestedLoops.Peek();
+            var idx = AddCommand(OperationCode.Jmp, DUMMY_ADDRESS);
+            loopInfo.breakStatements.Add(idx);
+        }
+        
+        protected override void VisitContinueNode(LineMarkerNode node)
+        {
+            ExitTryBlocks();
+            var loopInfo = _nestedLoops.Peek();
+            AddCommand(OperationCode.Jmp, loopInfo.startPoint);
+        }
+
+        protected override void VisitReturnNode(BslSyntaxNode node)
+        {
+            if (node.Children.Count != 0)
+            {
+                VisitExpression(node.Children[0]);
+                AddCommand(OperationCode.MakeRawValue);
+            }
+            
+            AddCommand(OperationCode.Return);
+        }
+
+        protected override void VisitRaiseNode(BslSyntaxNode node)
+        {
+            int arg = -1;
+            if (node.Children.Count != 0)
+            {
+                VisitExpression(node.Children[0]);
+                arg = 0;
+            }
+
+            AddCommand(OperationCode.RaiseException, arg);
+        }
+
+        protected override void VisitIfNode(ConditionNode node)
+        {
+            var exitIndices = new List<int>();
+            VisitIfExpression(node.Expression);
+            
+            var jumpFalseIndex = AddCommand(OperationCode.JmpFalse, DUMMY_ADDRESS);
+
+            VisitIfTruePart(node.TruePart);
+            exitIndices.Add(AddCommand(OperationCode.Jmp, DUMMY_ADDRESS));
+
+            bool hasAlternativeBranches = false;
+            
+            foreach (var alternative in node.GetAlternatives())
+            {
+                CorrectCommandArgument(jumpFalseIndex, _module.Code.Count);
+                if (alternative is ConditionNode elif)
+                {
+                    AddLineNumber(alternative.Location.LineNumber);
+                    VisitIfExpression(elif.Expression);
+                    jumpFalseIndex = AddCommand(OperationCode.JmpFalse, DUMMY_ADDRESS);
+                    VisitIfTruePart(elif.TruePart);
+                    exitIndices.Add(AddCommand(OperationCode.Jmp, DUMMY_ADDRESS));
+                }
+                else
+                {
+                    hasAlternativeBranches = true;
+                    CorrectCommandArgument(jumpFalseIndex, _module.Code.Count);
+                    AddLineNumber(alternative.Location.LineNumber, CodeGenerationFlags.CodeStatistics);
+                    VisitCodeBlock(alternative);
+                }
+            }
+
+            int exitIndex = AddLineNumber(node.EndLocation.LineNumber);
+
+            if (!hasAlternativeBranches)
+            {
+                CorrectCommandArgument(jumpFalseIndex, exitIndex);
+            }
+            
+            foreach (var indexToWrite in exitIndices)
+            {
+                CorrectCommandArgument(indexToWrite, exitIndex);
+            }
+        }
+
+        protected override void VisitBlockEnd(in CodeRange endLocation)
+        {
+            AddLineNumber(
+                endLocation.LineNumber,
+                CodeGenerationFlags.CodeStatistics | CodeGenerationFlags.DebugCode);
+        }
+
+        private void CorrectBreakStatements(NestedLoopInfo nestedLoopInfo, int endLoopIndex)
+        {
+            foreach (var breakCmdIndex in nestedLoopInfo.breakStatements)
+            {
+                CorrectCommandArgument(breakCmdIndex, endLoopIndex);
+            }
+        }
+
+        protected override void VisitAssignment(BslSyntaxNode assignment)
+        {
+            var left = assignment.Children[0];
+            var right = assignment.Children[1];
+            if (left is TerminalNode term)
+            {
+                VisitExpression(right);
+                VisitVariableWrite(term);
+            }
+            else
+            {
+                VisitReferenceRead(left);
+                VisitExpression(right);
+                AddCommand(OperationCode.AssignRef);
+            }
+        }
+
+        protected override void VisitResolveProperty(TerminalNode operand)
+        {
+            ResolveProperty(operand.GetIdentifier());
+        }
+
+        protected override void VisitVariableRead(TerminalNode node)
+        {
+            PushVariable(node);
+        }
+
+        protected override void VisitVariableWrite(TerminalNode node)
+        {
+            var identifier = node.GetIdentifier();
+            var hasVar = _ctx.FindVariable(identifier, out var varBinding);
+            if (hasVar)
+            {
+                if (varBinding.ScopeNumber == _ctx.ScopeCount - 1)
+                {
+                    AddCommand(OperationCode.LoadLoc, varBinding.MemberNumber);
+                }
+                else
+                {
+                    var num = GetVariableRefNumber(varBinding);
+                    AddCommand(OperationCode.LoadVar, num);
+                }
+            }
+            else
+            {
+                // can create variable
+                var binding = _ctx.DefineVariable(new LocalVariableSymbol(identifier));
+                AddCommand(OperationCode.LoadLoc, binding.MemberNumber);
+            }
+        }
+
+        protected override void VisitObjectFunctionCall(BslSyntaxNode node)
+        {
+            ResolveObjectMethod(node, true);
+        }
+
+        protected override void VisitObjectProcedureCall(BslSyntaxNode node)
+        {
+            ResolveObjectMethod(node, false);
+        }
+
+        protected override void VisitIndexExpression(BslSyntaxNode operand)
+        {
+            base.VisitIndexExpression(operand);
+            AddCommand(OperationCode.PushIndexed);
+        }
+
+        protected override void VisitGlobalFunctionCall(CallNode node)
+        {
+            if (LanguageDef.IsBuiltInFunction(node.Identifier.Lexem.Token))
+            {
+                BuiltInFunctionCall(node);
+            }
+            else
+            {
+                GlobalCall(node, true);
+            }
+        }
+
+        private void BuiltInFunctionCall(CallNode node)
+        {
+            var funcId = BuiltInFunctionCode(node.Identifier.Lexem.Token);
+
+            var argsPassed = node.ArgumentList.Children.Count;
+            PushArgumentsList(node.ArgumentList);
+            if (funcId == OperationCode.Min || funcId == OperationCode.Max)
+            {
+                if (argsPassed == 0)
+                    AddError(CompilerErrors.TooFewArgumentsPassed(), node.ArgumentList.Location);
+            }
+            else
+            {
+                var parameters = BuiltinFunctions.ParametersInfo(funcId);
+                FullCheckFactArguments(parameters, node.ArgumentList);
+            }
+
+            AddCommand(funcId, argsPassed);
+        }
+
+        private void CheckFactArguments(ParameterInfo[] parameters, BslSyntaxNode argList)
+        {
+            var argsPassed = argList.Children.Count;
+            if (argsPassed > parameters.Length)
+            {
+                AddError(CompilerErrors.TooManyArgumentsPassed(), argList.Location);
+                return;
+            }
+            
+            if (parameters.Skip(argsPassed).Any(param => !param.HasDefaultValue))
+            {
+                AddError(CompilerErrors.TooFewArgumentsPassed(), argList.Location);
+            }
+        }
+
+        private void CheckFactArguments(BslMethodInfo method, BslSyntaxNode argList)
+        {
+            var argsToCheck = method is ContextMethodInfo { InjectsProcess: true } ? 
+                method.GetParameters().Skip(1).ToArray() : 
+                method.GetParameters();
+            
+            CheckFactArguments(argsToCheck, argList);
+        }
+
+        private void FullCheckFactArguments(ParameterInfo[] parameters, BslSyntaxNode argList)
+        {
+            var argsPassed = argList.Children.Count;
+            if (argsPassed > parameters.Length)
+            {
+                AddError(CompilerErrors.TooManyArgumentsPassed(), argList.Location);
+                return;
+            }
+
+            int i = 0;
+            for (; i < argsPassed; i++)
+            {
+                if (!parameters[i].HasDefaultValue && argList.Children[i].Children.Count == 0)
+                {
+                    AddError(CompilerErrors.MissedArgument(), argList.Location);
+                }
+            }
+            for (; i < parameters.Length; i++)
+            {
+                if (!parameters[i].HasDefaultValue)
+                {
+                    AddError(CompilerErrors.TooFewArgumentsPassed(), argList.Location);
+                    return;
+                }
+            }
+        }
+
+        protected override void VisitGlobalProcedureCall(CallNode node)
+        {
+            if (LanguageDef.IsBuiltInFunction(node.Identifier.Lexem.Token))
+            {   
+                AddError(LocalizedErrors.UseBuiltInFunctionAsProcedure(), node.Location);
+                return;
+            }
+            GlobalCall(node, false);
+        }
+
+        private void ResolveObjectMethod(BslSyntaxNode callNode, bool asFunction)
+        {
+            var name = callNode.Children[0];
+            var args = callNode.Children[1];
+            
+            Debug.Assert(name != null);
+            Debug.Assert(args != null);
+            
+            PushCallArguments(args);
+            
+            int lastIdentifierIndex = GetIdentNumber(name.GetIdentifier());
+            
+            if (asFunction)
+                AddCommand(OperationCode.ResolveMethodFunc, lastIdentifierIndex);
+            else
+                AddCommand(OperationCode.ResolveMethodProc, lastIdentifierIndex);
+        }
+        
+        private void ResolveProperty(string identifier)
+        {
+            AddCommand(OperationCode.ResolveProp, GetIdentNumber(identifier));
+        }
+
+        private int PushVariable(TerminalNode node)
+        {
+            var identifier = node.GetIdentifier();
+            if (!_ctx.FindVariable(identifier, out var varNum))
+            {
+                AddError(LocalizedErrors.SymbolNotFound(identifier), node.Location);
+                return -1;
+            }
+
+            var symbol = _ctx.GetVariable(varNum);
+            
+            if (symbol is IPropertySymbol propSymbol)
+            {
+                if (_importsOption != ExplicitImportsBehavior.Disabled && symbol is IPackageSymbol pkgSymbol)
+                {
+                    CheckExplicitImport(node, pkgSymbol, symbol);
+                }
+                
+                if (propSymbol.Property is ISupportsDeprecation { IsDeprecated: true } && 
+                    !_reportedOldProperties.Contains(propSymbol.Property))
+                {
+                    var message = BilingualString.Localize(
+                        $"Использование устаревшего свойства \"{identifier}\" в файле \"{_sourceCode.Location}\" ({node.Location})",
+                        $"Usage of deprecated property \"{identifier}\" in \"{_sourceCode.Location}\" ({node.Location})"
+                    );
+                    _reportedOldProperties.Add(propSymbol.Property);
+                    SystemLogger.Write(message);
+                }
+                
+                return PushPropertyReference(varNum);
+            }
+            else
+            {
+                return PushSimpleVariable(varNum);
+            }
+        }
+
+        private void CheckExplicitImport(TerminalNode node, IPackageSymbol pkgSymbol, IVariableSymbol symbol)
+        {
+            var packageInfo = pkgSymbol.GetPackageInfo();
+            var id = packageInfo.Id;
+
+            // Если модуль принадлежит той же библиотеке - не требуем явный импорт
+            if (_sourceCode.OwnerPackageId != null && id == _sourceCode.OwnerPackageId)
+                return;
+
+            if (!_localImports.Contains(id))
+            {
+                var error = CompilerErrors.MissedImport(symbol.Name, packageInfo.ShortName);
+                error.Position = MakeCodePosition(node.Location);
+                switch (_importsOption)
+                {
+                    case ExplicitImportsBehavior.Enabled:
+                        AddError(error);
+                        break;
+                    case ExplicitImportsBehavior.Warn:
+                        SystemLogger.Write(error.ToString());
+                        break;
+                }
+            }
+        }
+
+        private int PushSimpleVariable(SymbolBinding binding)
+        {
+            if (binding.ScopeNumber == _ctx.ScopeCount - 1)
+            {
+                return AddCommand(OperationCode.PushLoc, binding.MemberNumber);
+            }
+            else
+            {
+                var idx = GetVariableRefNumber(binding);
+                return AddCommand(OperationCode.PushVar, idx);
+            }
+        }
+
+        private int PushPropertyReference(SymbolBinding binding)
+        {
+            var idx = GetVariableRefNumber(binding);
+
+            return AddCommand(OperationCode.PushRef, idx);
+        }
+
+        private void GlobalCall(CallNode call, bool asFunction)
+        {
+            var identifierNode = call.Identifier;
+            var argList = call.ArgumentList;
+            
+            Debug.Assert(identifierNode != null);
+            Debug.Assert(argList != null);
+            
+            var identifier = identifierNode.Lexem.Content;
+            
+            var hasMethod = _ctx.TryFindMethodBinding(identifier, out var methBinding);
+            if (hasMethod)
+            {
+                var scope = _ctx.GetScope(methBinding.ScopeNumber);
+
+                var methInfo = scope.Methods[methBinding.MemberNumber].Method;
+                if (asFunction && !methInfo.IsFunction())
+                {
+                    AddError(CompilerErrors.UseProcAsFunction(), identifierNode.Location);
+                    return;
+                }
+
+                PushCallArguments(argList);
+                CheckFactArguments(methInfo, argList);
+
+                if (asFunction)
+                    AddCommand(OperationCode.CallFunc, GetMethodRefNumber(methBinding));
+                else
+                    AddCommand(OperationCode.CallProc, GetMethodRefNumber(methBinding)); 
+            }
+            else
+            {
+                // can be defined later
+                var forwarded = new ForwardedMethodDecl
+                {
+                    identifier = identifier,
+                    asFunction = asFunction,
+                    location = identifierNode.Location,
+                    factArguments = argList
+                };
+
+                PushCallArguments(call.ArgumentList);
+                
+                var opCode = asFunction ? OperationCode.CallFunc : OperationCode.CallProc;
+                forwarded.commandIndex = AddCommand(opCode, DUMMY_ADDRESS);
+                _forwardedMethods.Add(forwarded);
+            }
+        }
+
+        private void PushCallArguments(BslSyntaxNode argList)
+        {
+            PushArgumentsList(argList);
+            AddCommand(OperationCode.ArgNum, argList.Children.Count);
+        }
+
+        private void PushArgumentsList(BslSyntaxNode argList)
+        {
+            var arguments = argList.Children;
+            for (int i = 0; i < arguments.Count; i++)
+            {
+                VisitCallArgument(arguments[i]);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void VisitCallArgument(BslSyntaxNode passedArg)
+        {
+            if (passedArg.Children.Count != 0)
+            {
+                VisitExpression(passedArg.Children[0]);
+            }
+            else
+            {
+                AddCommand(OperationCode.PushDefaultArg);
+            }
+        }
+
+        protected override void VisitTernaryOperation(BslSyntaxNode expression)
+        {
+            VisitExpression(expression.Children[0]);
+            AddCommand(OperationCode.MakeBool);
+            var addrOfCondition = AddCommand(OperationCode.JmpFalse, DUMMY_ADDRESS);
+
+            VisitExpression(expression.Children[1]); // построили true-part
+
+            var endOfTruePart = AddCommand(OperationCode.Jmp, DUMMY_ADDRESS); // уход в конец оператора
+            
+            CorrectCommandArgument(addrOfCondition, _module.Code.Count); // отметили, куда переходить по false
+            VisitExpression(expression.Children[2]); // построили false-part
+            
+            CorrectCommandArgument(endOfTruePart, _module.Code.Count);
+        }
+
+        protected override void VisitUnaryOperation(UnaryOperationNode unaryOperationNode)
+        {
+            var child = unaryOperationNode.Children[0];
+            VisitExpression(child);
+            var opCode = TokenToOperationCode(unaryOperationNode.Operation);
+            AddCommand(opCode);
+        }
+        
+        protected override void VisitBinaryOperation(BinaryOperationNode binaryOperationNode)
+        {
+            if (LanguageDef.IsLogicalBinaryOperator(binaryOperationNode.Operation))
+            {
+                VisitExpression(binaryOperationNode.Children[0]);
+                var logicalCmdIndex = AddCommand(TokenToOperationCode(binaryOperationNode.Operation));
+                VisitExpression(binaryOperationNode.Children[1]);
+                AddCommand(OperationCode.MakeBool);
+                CorrectCommandArgument(logicalCmdIndex, _module.Code.Count - 1);
+            }
+            else
+            {
+                VisitExpression(binaryOperationNode.Children[0]);
+                VisitExpression(binaryOperationNode.Children[1]);
+                AddCommand(TokenToOperationCode(binaryOperationNode.Operation));
+            }
+        }
+
+        protected override void VisitTryExceptNode(TryExceptNode node)
+        {
+            var beginTryIndex = AddCommand(OperationCode.BeginTry, DUMMY_ADDRESS);
+            VisitTryBlock(node.TryBlock);
+            var jmpIndex = AddCommand(OperationCode.Jmp, DUMMY_ADDRESS);
+
+            var beginHandler = AddLineNumber(
+                node.ExceptBlock.Location.LineNumber,
+                CodeGenerationFlags.CodeStatistics);
+
+            CorrectCommandArgument(beginTryIndex, beginHandler);
+
+            VisitExceptBlock(node.ExceptBlock);
+
+            var endIndex = AddLineNumber(node.EndLocation.LineNumber,
+                CodeGenerationFlags.CodeStatistics | CodeGenerationFlags.DebugCode);
+            
+            AddCommand(OperationCode.EndTry, beginHandler);
+            CorrectCommandArgument(jmpIndex, endIndex);
+        }
+
+        protected override void VisitTryBlock(CodeBatchNode node)
+        {
+            PushTryNesting();
+            base.VisitTryBlock(node);
+            PopTryNesting();
+        }
+
+        protected override void VisitExecuteStatement(BslSyntaxNode node)
+        {
+            base.VisitExecuteStatement(node);
+            AddCommand(OperationCode.Execute);
+        }
+
+        protected override void VisitHandlerOperation(BslSyntaxNode node)
+        {
+            var eventNameNode = node.Children[0];
+            
+            // выражение источника события
+            VisitExpression(eventNameNode.Children[0]);
+            
+            if (eventNameNode.Kind == NodeKind.DereferenceOperation)
+            {
+                var eventName = eventNameNode.Children[1].AsTerminal().Lexem;
+                eventName.Type = LexemType.StringLiteral;
+                VisitConstant(eventName);
+            }
+            else
+            {
+                Debug.Assert(eventNameNode.Kind == NodeKind.IndexAccess);
+                VisitExpression(eventNameNode.Children[1]);
+            }
+            
+            var handlerNode = node.Children[1];
+            int commandArg;
+            if (handlerNode.Kind == NodeKind.Identifier)
+            {
+                var terminal = handlerNode.AsTerminal();
+                var identifier = terminal.GetIdentifier();
+                if (_ctx.TryFindMethodBinding(identifier, out _))
+                {
+                    var lex = terminal.Lexem;
+                    lex.Type = LexemType.StringLiteral;
+                    VisitConstant(lex);
+                }
+                else
+                {
+                    AddError(LocalizedErrors.SymbolNotFound(identifier));
+                }
+                commandArg = 1;
+            }
+            else if (handlerNode.Kind == NodeKind.DereferenceOperation)
+            {
+                var eventName = handlerNode.Children[1].AsTerminal().Lexem;
+                eventName.Type = LexemType.StringLiteral;
+                VisitExpression(handlerNode.Children[0]);
+                VisitConstant(eventName);
+                commandArg = 0;
+            }
+            else
+            {
+                Debug.Assert(handlerNode.Kind == NodeKind.IndexAccess);
+                VisitExpression(handlerNode.Children[0]);
+                VisitExpression(handlerNode.Children[1]);
+                commandArg = 0;
+            }
+
+            AddCommand(node.Kind == NodeKind.AddHandler ? OperationCode.AddHandler : OperationCode.RemoveHandler, commandArg);
+        }
+
+        protected override void VisitNewObjectCreation(NewObjectNode node)
+        {
+            if (node.IsDynamic)
+            {
+                MakeNewObjectDynamic(node);
+            }
+            else
+            {
+                MakeNewObjectStatic(node);
+            }
+        }
+        
+        private void MakeNewObjectDynamic(NewObjectNode node)
+        {
+            VisitExpression(node.TypeNameNode);
+
+            var argsPassed = node.ConstructorArguments.Children.Count;
+            if (argsPassed == 1)
+            {
+                VisitCallArgument(node.ConstructorArguments.Children[0]); ;
+            }
+            else if (argsPassed > 1)
+            {
+                AddError(CompilerErrors.TooManyArgumentsPassed(), node.ConstructorArguments.Location);
+            }
+
+            AddCommand(OperationCode.NewFunc, argsPassed);
+        }
+        
+        private void MakeNewObjectStatic(NewObjectNode node)
+        {
+            if (node.ConstructorArguments != default)
+            {
+                PushCallArguments(node.ConstructorArguments);
+            }
+            else
+            {
+                AddCommand(OperationCode.ArgNum, 0);
+            }
+
+            var idNum = GetIdentNumber(node.TypeNameNode.GetIdentifier());
+            AddCommand(OperationCode.NewInstance, idNum);
+        }
+
+        private void ExitTryBlocks()
+        {
+            var tryBlocks = _nestedLoops.Peek().tryNesting;
+            if (tryBlocks > 0)
+                AddCommand(OperationCode.ExitTry, tryBlocks);
+        }
+
+        private void PushTryNesting()
+        {
+            if (_nestedLoops.Count != 0)
+            {
+                _nestedLoops.Peek().tryNesting++;
+            }
+        }
+        
+        private void PopTryNesting()
+        {
+            if (_nestedLoops.Count != 0)
+            {
+                _nestedLoops.Peek().tryNesting--;
+            }
+        }
+        
+        private void CorrectCommandArgument(int index, int newArgument)
+        {
+            var cmd = _module.Code[index];
+            cmd.Argument = newArgument;
+            _module.Code[index] = cmd;
+        }
+
+        private static OperationCode TokenToOperationCode(Token stackOp)
+        {
+            OperationCode opCode;
+            switch (stackOp)
+            {
+                case Token.Equal:
+                    opCode = OperationCode.Equals;
+                    break;
+                case Token.NotEqual:
+                    opCode = OperationCode.NotEqual;
+                    break;
+                case Token.Plus:
+                    opCode = OperationCode.Add;
+                    break;
+                case Token.Minus:
+                    opCode = OperationCode.Sub;
+                    break;
+                case Token.Multiply:
+                    opCode = OperationCode.Mul;
+                    break;
+                case Token.Division:
+                    opCode = OperationCode.Div;
+                    break;
+                case Token.Modulo:
+                    opCode = OperationCode.Mod;
+                    break;
+                case Token.UnaryPlus:
+                    opCode = OperationCode.Number;
+                    break;
+                case Token.UnaryMinus:
+                    opCode = OperationCode.Neg;
+                    break;
+                case Token.And:
+                    opCode = OperationCode.And;
+                    break;
+                case Token.Or:
+                    opCode = OperationCode.Or;
+                    break;
+                case Token.Not:
+                    opCode = OperationCode.Not;
+                    break;
+                case Token.LessThan:
+                    opCode = OperationCode.Less;
+                    break;
+                case Token.LessOrEqual:
+                    opCode = OperationCode.LessOrEqual;
+                    break;
+                case Token.MoreThan:
+                    opCode = OperationCode.Greater;
+                    break;
+                case Token.MoreOrEqual:
+                    opCode = OperationCode.GreaterOrEqual;
+                    break;
+                case Token.AddHandler:
+                    opCode = OperationCode.AddHandler;
+                    break;
+                case Token.RemoveHandler:
+                    opCode = OperationCode.RemoveHandler;
+                    break;
+                default:
+                    throw new NotSupportedException();
+            }
+            return opCode;
+        }
+
+        protected override void VisitConstant(TerminalNode node)
+        {
+            VisitConstant(node.Lexem);
+        }
+        
+        private void VisitConstant(in Lexem constant)
+        {
+            if (constant.Type == LexemType.BooleanLiteral)
+            {
+                AddCommand(OperationCode.PushBool, (bool)(BslValue)BslBooleanValue.Parse(constant.Content) ? 1 : 0);
+            }
+            else if (constant.Type == LexemType.NumberLiteral && ParseIntegerString(constant.Content, out var integer)) 
+            {
+                AddCommand(OperationCode.PushInt, integer);
+            }
+            else if (constant.Type == LexemType.UndefinedLiteral)
+            {
+                AddCommand(OperationCode.PushUndef);
+            }
+            else if (constant.Type == LexemType.NullLiteral)
+            {
+                AddCommand(OperationCode.PushNull);
+            }
+            else
+            {
+                var cDef = CreateConstDefinition(constant);
+                var num = GetConstNumber(cDef);
+                AddCommand(OperationCode.PushConst, num);
+            }
+        }
+
+        private bool ParseIntegerString(string constantContent, out int integer)
+        {
+            return int.TryParse(constantContent, NumberStyles.None, NumberFormatInfo.InvariantInfo, out integer);
+        }
+
+        private IEnumerable<BslAnnotationAttribute> GetAnnotationAttributes(AnnotatableNode node)
+        {
+            var mappedAnnotations = new List<BslAnnotationAttribute>();
+            foreach (var annotation in node.Annotations)
+            {
+                var anno = new BslAnnotationAttribute(annotation.Name);
+                anno.SetParameters(GetAnnotationParameters(annotation));
+                mappedAnnotations.Add(anno);
+            }
+
+            return mappedAnnotations;
+        }
+        
+        private IEnumerable<BslAnnotationParameter> GetAnnotationParameters(AnnotationNode node)
+        {
+            return node.Children.Cast<AnnotationParameterNode>()
+                .Select(MakeAnnotationParameter)
+                .ToList();
+        }
+
+        private BslAnnotationParameter MakeAnnotationParameter(AnnotationParameterNode param)
+        {
+            var runtimeValue = MakeAnnotationParameterValueConstant(param);
+            return new BslAnnotationParameter(param.Name, runtimeValue);
+        }
+
+        private BslPrimitiveValue MakeAnnotationParameterValueConstant(AnnotationParameterNode param)
+        {
+            if (param.AnnotationNode != null)
+            {
+                var runtimeValue = new BslAnnotationValue(param.AnnotationNode.Name);
+                foreach (var child in param.AnnotationNode.Children)
+                {
+                    var parameter = (AnnotationParameterNode)child;
+                    var parameterValue = MakeAnnotationParameterValueConstant(parameter);
+                    runtimeValue.Parameters.Add(new BslAnnotationParameter(parameter.Name, parameterValue));
+                }
+                return runtimeValue;
+            }
+            else
+            if (param.Value.Type != LexemType.NotALexem)
+            {
+                var constDef = CreateConstDefinition(param.Value);
+                var constNumber = GetConstNumber(constDef);
+                var runtimeValue = _module.Constants[constNumber];
+                return runtimeValue;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        private IEnumerable<BslAnnotationAttribute> GetAnnotations(AnnotatableNode parent)
+        {
+            return parent.Annotations.Select(a =>
+                new BslAnnotationAttribute(
+                    a.Name,
+                    GetAnnotationParameters(a)));
+        }
+
+        private static BslMethodBuilder<MachineMethodInfo> NewMethod() =>
+            new BslMethodInfoFactory<MachineMethodInfo>(() => new MachineMethodInfo())
+                .NewMethod();
+        
+        private static ConstDefinition CreateConstDefinition(in Lexem lex)
+        {
+            DataType constType;
+            switch (lex.Type)
+            {
+                case LexemType.BooleanLiteral:
+                    constType = DataType.Boolean;
+                    break;
+                case LexemType.DateLiteral:
+                    constType = DataType.Date;
+                    break;
+                case LexemType.NumberLiteral:
+                    constType = DataType.Number;
+                    break;
+                case LexemType.StringLiteral:
+                    constType = DataType.String;
+                    break;
+                case LexemType.NullLiteral:
+                    constType = DataType.Null;
+                    break;
+                case LexemType.UndefinedLiteral:
+                    constType = DataType.Undefined;
+                    break;
+                default:
+                    throw new ArgumentException($"Can't create constant for literal from {lex.ToString()}");
+            }
+
+            ConstDefinition cDef = new ConstDefinition()
+            {
+                Type = constType,
+                Presentation = lex.Content
+            };
+            return cDef;
+        }
+
+        private int GetConstNumber(in ConstDefinition cDef)
+        {
+            var idx = _constMap.IndexOf(cDef);
+            if (idx < 0)
+            {
+                idx = _constMap.Count;
+                _constMap.Add(cDef);
+                _module.Constants.Add((BslPrimitiveValue)ValueFactory.Parse(cDef.Presentation, cDef.Type));
+            }
+            return idx;
+        }
+
+        private int GetIdentNumber(string ident)
+        {
+            var idx = _module.Identifiers.IndexOf(ident);
+            if (idx < 0)
+            {
+                idx = _module.Identifiers.Count;
+                _module.Identifiers.Add(ident);
+            }
+            return idx;
+        }
+
+
+        private int GetMethodRefNumber(in SymbolBinding methodBinding)
+        {
+            var descriptor = _ctx.GetBinding(methodBinding.ScopeNumber);
+            var imageBinding = new ModuleSymbolBinding
+            {
+                Target = descriptor.Target,
+                MemberNumber = methodBinding.MemberNumber,
+                Kind = descriptor.Kind,
+                ScopeIndex = descriptor.ScopeIndex
+            };
+            
+            var idx = _module.MethodRefs.IndexOf(imageBinding);
+            if (idx < 0)
+            {
+                idx = _module.MethodRefs.Count;
+                _module.MethodRefs.Add(imageBinding);
+            }
+            return idx;
+        }
+
+        private int GetVariableRefNumber(in SymbolBinding binding)
+        {
+            var descriptor = _ctx.GetBinding(binding.ScopeNumber);
+            var imageBinding = new ModuleSymbolBinding
+            {
+                Target = descriptor.Target,
+                MemberNumber = binding.MemberNumber,
+                Kind = descriptor.Kind,
+                ScopeIndex = descriptor.ScopeIndex
+            };
+            
+            var idx = _module.VariableRefs.IndexOf(imageBinding);
+            if (idx < 0)
+            {
+                idx = _module.VariableRefs.Count;
+                _module.VariableRefs.Add(imageBinding);
+            }
+
+            return idx;
+        }
+        
+        private void AddError(CodeError error, in CodeRange location)
+        {
+            error.Position = MakeCodePosition(location);
+            _errorSink.AddError(error);
+        }
+        
+        private void AddError(CodeError error)
+        {
+            _errorSink.AddError(error);
+        }
+
+        private ErrorPositionInfo MakeCodePosition(CodeRange range)
+        {
+            return new ErrorPositionInfo
+            {
+                Code = _sourceCode.GetCodeLine(range.LineNumber),
+                LineNumber = range.LineNumber,
+                ColumnNumber = range.ColumnNumber,
+                ModuleName = _sourceCode.Name
+            };
+        }
+
+        private int AddCommand(OperationCode code, int arg = 0)
+        {
+            var addr = _module.Code.Count;
+            _module.Code.Add(new Command() { Code = code, Argument = arg });
+            return addr;
+        }
+        
+        private int AddLineNumber(int linenum, CodeGenerationFlags emitConditions = CodeGenerationFlags.Always)
+        {
+            var addr = _module.Code.Count;
+            bool emit = emitConditions == CodeGenerationFlags.Always || ExtraCodeConditionsMet(emitConditions);
+            if (emit)
+            {
+                _module.Code.Add(new Command() { Code = OperationCode.LineNum, Argument = linenum });
+            }
+            return addr;
+        }
+
+        private bool ExtraCodeConditionsMet(CodeGenerationFlags emitConditions)
+        {
+            return (((int)ProduceExtraCode) & (int)emitConditions) != 0;
+        }
+        
+        #region Static cache
+        
+        private static readonly Dictionary<Token, OperationCode> _tokenToOpCode;
+        
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static OperationCode BuiltInFunctionCode(Token token)
+        {
+            return _tokenToOpCode[token];
+        }
+        
+        static StackMachineCodeGenerator()
+        {
+            _tokenToOpCode = new Dictionary<Token, OperationCode>();
+
+            var tokens  = LanguageDef.BuiltInFunctions();
+            var opCodes = BuiltinFunctions.GetOperationCodes();
+
+            Debug.Assert(tokens.Length == opCodes.Length);
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                _tokenToOpCode.Add(tokens[i], opCodes[i]);
+            }
+        }
+        
+        #endregion
+    }
+}

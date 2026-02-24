@@ -4,10 +4,11 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
-using System;
+
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Values;
 
 namespace ScriptEngine.Machine.Contexts
 {
@@ -17,22 +18,38 @@ namespace ScriptEngine.Machine.Contexts
         
         public DynamicPropertiesAccessor()
         {
-            _propHolder = new DynamicPropertiesHolder();
+            _propHolder = new DynamicPropertiesHolder(InfoFactory);
         }
- 
-        protected int RegisterProperty(string name)
+
+        private BslPropertyInfo InfoFactory(int index, string identifier, bool canRead, bool canWrite)
         {
-            return _propHolder.RegisterProperty(name);
+            return OnPropertyRegistration(index, identifier, canRead, canWrite);
+        }
+        
+        protected virtual BslPropertyInfo OnPropertyRegistration(int index, string propertyName, bool canRead, bool canWrite)
+        {
+            return BslPropertyBuilder.Create()
+                .Name(propertyName)
+                .CanRead(canRead)
+                .CanWrite(canWrite)
+                .SetDispatchingIndex(index)
+                .ReturnType(typeof(BslValue))
+                .Build();
+        }
+
+        protected int RegisterProperty(string name, bool canRead = true, bool canWrite = true)
+        {
+            return _propHolder.RegisterProperty(name, canRead, canWrite);
+        }
+        
+        protected int RegisterProperty(BslPropertyInfo propInfo)
+        {
+            return _propHolder.RegisterProperty(propInfo);
         }
 
         protected void RemoveProperty(string name)
         {
             _propHolder.RemoveProperty(name);
-        }
-
-        protected void ReorderPropertyNumbers()
-        {
-            _propHolder.ReorderPropertyNumbers();
         }
 
         protected void ClearProperties()
@@ -45,9 +62,14 @@ namespace ScriptEngine.Machine.Contexts
             return _propHolder.GetPropertyName(idx);
         }
 
-        protected virtual IEnumerable<KeyValuePair<string, int>> GetProperties()
+        protected virtual IEnumerable<KeyValuePair<string, int>> GetDynamicProperties()
         {
             return _propHolder.GetProperties();
+        }
+
+        public override BslPropertyInfo GetPropertyInfo(int index)
+        {
+            return _propHolder[index];
         }
 
         #region IRuntimeContextInstance Members
@@ -67,7 +89,7 @@ namespace ScriptEngine.Machine.Contexts
             return GetPropertyName(propNum);
         }
 
-        public override int FindProperty(string name)
+        public override int GetPropertyNumber(string name)
         {
             try
             {
@@ -75,7 +97,7 @@ namespace ScriptEngine.Machine.Contexts
             }
             catch (KeyNotFoundException)
             {
-                throw RuntimeException.PropNotFoundException(name);
+                throw PropertyAccessException.PropNotFoundException(name);
             }
         }
 

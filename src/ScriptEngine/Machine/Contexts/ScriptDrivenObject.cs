@@ -7,44 +7,35 @@ at http://mozilla.org/MPL/2.0/.
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using ScriptEngine.Environment;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
 
 namespace ScriptEngine.Machine.Contexts
 {
     public abstract class ScriptDrivenObject : PropertyNameIndexAccessor, IRunnable
     {
-        private LoadedModule _module;
+        private IExecutableModule _module;
         private IVariable[] _state;
         private int VARIABLE_COUNT;
         private int METHOD_COUNT;
-        private MethodInfo[] _attachableMethods;
+        private BslMethodInfo[] _attachableMethods;
         private readonly Dictionary<string, int> _methodSearchCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> _propertySearchCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> _allPropertiesSearchCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        [Obsolete]
-        public ScriptDrivenObject(LoadedModuleHandle module) : this(module.Module)
-        {
-        }
+        public IExecutableModule Module => _module; 
 
-        [Obsolete]
-        public ScriptDrivenObject(LoadedModuleHandle module, bool deffered) : this(module.Module, deffered)
-        {
-        }
-        
-        public LoadedModule Module => _module;
-
-        protected ScriptDrivenObject(LoadedModule module, bool deffered)
-            : base(TypeManager.GetTypeByName("Object"))
+        protected ScriptDrivenObject(IExecutableModule module, bool deferred)
         {
             _module = module;
-            if (!deffered)
+            if (!deferred)
             {
                 InitOwnData();
             }
         }
 
-        protected ScriptDrivenObject(LoadedModule module)
-            : base(TypeManager.GetTypeByName("Object"))
+        protected ScriptDrivenObject(StackRuntimeModule module)
         {
             _module = module;
             InitOwnData();
@@ -54,44 +45,59 @@ namespace ScriptEngine.Machine.Contexts
         {
         }
 
-        protected void SetModule(LoadedModule module)
+        protected void SetModule(StackRuntimeModule module)
         {
             _module = module;
         }
 
         public void InitOwnData()
         {
-            
             VARIABLE_COUNT = GetOwnVariableCount();
             METHOD_COUNT = GetOwnMethodCount();
 
-            int stateSize = VARIABLE_COUNT + _module.Variables.Count;
+            ClearSearchCaches();
+
+            int stateSize = VARIABLE_COUNT + _module.Fields.Count;
             _state = new IVariable[stateSize];
             for (int i = 0; i < stateSize; i++)
             {
                 if (i < VARIABLE_COUNT)
-                    _state[i] = Variable.CreateContextPropertyReference(this, i, GetOwnPropName(i));
+                {
+                    var name = GetOwnPropName(i);
+                    _state[i] = Variable.CreateContextPropertyReference(this, i, name);
+                    _allPropertiesSearchCache.Add(name, i);
+                }
                 else
-                    _state[i] = Variable.Create(ValueFactory.Create(), _module.Variables[i-VARIABLE_COUNT]);
+                {
+                    var name = _module.Fields[i - VARIABLE_COUNT].Name;
+                    _state[i] = Variable.Create(ValueFactory.Create(), name);
+                    _allPropertiesSearchCache.Add(name, i);
+                }
             }
 
-            ReadExportedSymbols(_module.ExportedMethods, _methodSearchCache);
-            ReadExportedSymbols(_module.ExportedProperies, _propertySearchCache);
+            foreach (var prop in _module.Properties.Cast<BslScriptPropertyInfo>())
+            {
+                _propertySearchCache.Add(prop.Name, prop.DispatchId);
+            }
+
+            foreach (var method in _module.Methods.Cast<BslScriptMethodInfo>())
+            {
+                if(method.IsPublic)
+                    _methodSearchCache.Add(method.Name, method.DispatchId);
+            }
+
         }
 
-        private void ReadExportedSymbols(ExportedSymbol[] exportedSymbols, Dictionary<string, int> searchCache)
+        private void ClearSearchCaches()
         {
-            for (int i = 0; i < exportedSymbols.Length; i++)
-            {
-                var es = exportedSymbols[i];
-                searchCache[es.SymbolicName] = es.Index;
-            }
+            _propertySearchCache.Clear();
+            _methodSearchCache.Clear();
+            _allPropertiesSearchCache.Clear();
         }
 
         protected abstract int GetOwnVariableCount();
         protected abstract int GetOwnMethodCount();
-        protected abstract void UpdateState();
-        
+
         public bool MethodDefinedInScript(int index)
         {
             return index >= METHOD_COUNT;
@@ -107,25 +113,28 @@ namespace ScriptEngine.Machine.Contexts
             return indexInContext - METHOD_COUNT;
         }
 
-        protected virtual void OnInstanceCreation()
+        protected virtual void OnInstanceCreation(IBslProcess process)
         {
-            MachineInstance.Current.ExecuteModuleBody(this);
+            if (_module.ModuleBody == null)
+                return;
+            
+            process.Run(this, _module, _module.ModuleBody, Array.Empty<IValue>());
         }
-
-        public void Initialize()
+        
+        public void Initialize(IBslProcess process)
         {
-            OnInstanceCreation();
+            OnInstanceCreation(process);
         }
 
         protected int GetScriptMethod(string methodName, string alias = null)
         {
             int index = -1;
 
-            for (int i = 0; i < _module.Methods.Length; i++)
+            for (int i = 0; i < _module.Methods.Count; i++)
             {
                 var item = _module.Methods[i];
-                if (StringComparer.OrdinalIgnoreCase.Compare(item.Signature.Name, methodName) == 0
-                    || (alias != null && StringComparer.OrdinalIgnoreCase.Compare(item.Signature.Name, alias) == 0))
+                if (StringComparer.OrdinalIgnoreCase.Compare(item.Name, methodName) == 0
+                    || (alias != null && StringComparer.OrdinalIgnoreCase.Compare(item.Name, alias) == 0))
                 {
                     index = i;
                     break;
@@ -135,13 +144,22 @@ namespace ScriptEngine.Machine.Contexts
             return index;
         }
 
-        protected IValue CallScriptMethod(int methodIndex, IValue[] parameters)
+        protected IValue CallScriptMethod(int methodIndex, IValue[] parameters, IBslProcess process)
         {
-            var returnValue = MachineInstance.Current.ExecuteMethod(this, methodIndex, parameters);
+            var returnValue = process.Run(this, _module, _module.Methods[methodIndex], parameters);
 
             return returnValue;
         }
 
+        public Action<IBslProcess, IValue[]> GetMethodExecutor(string methodName)
+        {
+            var id = GetScriptMethod(methodName);
+            if (id == -1)
+                throw RuntimeException.MethodNotFoundException(methodName, SystemType.Name);
+
+            return (process, args) => CallScriptMethod(id, args, process);
+        }
+        
         #region Own Members Call
 
         protected virtual int FindOwnProperty(string name)
@@ -179,17 +197,22 @@ namespace ScriptEngine.Machine.Contexts
             throw new NotImplementedException();
         }
 
-        protected virtual MethodInfo GetOwnMethod(int index)
+        protected virtual BslMethodInfo GetOwnMethod(int index)
+        {
+            throw new NotImplementedException();
+        }
+        
+        protected virtual BslPropertyInfo GetOwnPropertyInfo(int index)
         {
             throw new NotImplementedException();
         }
 
-        protected virtual void CallOwnProcedure(int index, IValue[] arguments)
+        protected virtual void CallOwnProcedure(int index, IValue[] arguments, IBslProcess process)
         {
             throw new NotImplementedException();
         }
 
-        protected virtual IValue CallOwnFunction(int index, IValue[] arguments)
+        protected virtual IValue CallOwnFunction(int index, IValue[] arguments, IBslProcess process)
         {
             throw new NotImplementedException();
         }
@@ -198,44 +221,25 @@ namespace ScriptEngine.Machine.Contexts
 
         #region IAttachableContext Members
 
-        public void OnAttach(MachineInstance machine, out IVariable[] variables, out MethodInfo[] methods)
+        IVariable IAttachableContext.GetVariable(int index)
         {
-            UpdateState();
-
-            variables = _state;
-            methods = AttachMethods();
+            return _state[index];
         }
 
-        private MethodInfo[] AttachMethods()
+        BslMethodInfo IAttachableContext.GetMethod(int index)
         {
-            if (_attachableMethods != null)
-                return _attachableMethods;
-
-            int totalMethods = METHOD_COUNT + _module.Methods.Length;
-            _attachableMethods = new MethodInfo[totalMethods];
-
-            var moduleMethods = _module.Methods.Select(x => x.Signature).ToArray();
-
-            for (int i = 0; i < totalMethods; i++)
-            {
-                if (MethodDefinedInScript(i))
-                {
-                    _attachableMethods[i] = moduleMethods[i - METHOD_COUNT];
-                }
-                else
-                {
-                    _attachableMethods[i] = GetOwnMethod(i);
-                }
-            }
-
-            return _attachableMethods;
+            return GetMethodInfo(index);
         }
+
+        int IAttachableContext.VariablesCount => _state.Length;
+        
+        int IAttachableContext.MethodsCount => GetMethodsCount();
 
         #endregion
 
         #region IRuntimeContextInstance Members
 
-        public override int FindProperty(string name)
+        public override int GetPropertyNumber(string name)
         {
             var idx = FindOwnProperty(name);
             if (idx >= 0)
@@ -248,11 +252,11 @@ namespace ScriptEngine.Machine.Contexts
                 if (_propertySearchCache.TryGetValue(name, out index))
                     return index;
                 else
-                    throw RuntimeException.PropNotFoundException(name);
+                    throw PropertyAccessException.PropNotFoundException(name);
             }
         }
 
-        public override int FindMethod(string name)
+        public override int GetMethodNumber(string name)
         {
             var idx = FindOwnMethod(name);
             if (idx >= 0)
@@ -265,7 +269,7 @@ namespace ScriptEngine.Machine.Contexts
                 if (_methodSearchCache.TryGetValue(name, out index))
                     return index;
                 else
-                    throw RuntimeException.MethodNotFoundException(name, _module.ModuleInfo.ModuleName);
+                    throw RuntimeException.MethodNotFoundException(name, _module.Source.Name);
             }
         }
 
@@ -319,11 +323,23 @@ namespace ScriptEngine.Machine.Contexts
             
         }
 
-        public override MethodInfo GetMethodInfo(int methodNumber)
+        public override BslPropertyInfo GetPropertyInfo(int propertyNumber)
+        {
+            if (PropDefinedInScript(propertyNumber))
+            {
+                return _module.Properties[propertyNumber-VARIABLE_COUNT];
+            }
+            else
+            {
+                return GetOwnPropertyInfo(propertyNumber);
+            }
+        }
+
+        public override BslMethodInfo GetMethodInfo(int methodNumber)
         {
             if (MethodDefinedInScript(methodNumber))
             {
-                return _module.Methods[methodNumber-METHOD_COUNT].Signature;
+                return _module.Methods[methodNumber-METHOD_COUNT];
             }
             else
             {
@@ -331,46 +347,45 @@ namespace ScriptEngine.Machine.Contexts
             }
         }
 
-        public override void CallAsProcedure(int methodNumber, IValue[] arguments)
+        public override void CallAsProcedure(int methodNumber, IValue[] arguments, IBslProcess process)
         {
             if (MethodDefinedInScript(methodNumber))
             {
-                MachineInstance.Current.ExecuteMethod(this, methodNumber - METHOD_COUNT, arguments);
+                process.Run(this, _module, _module.Methods[methodNumber - METHOD_COUNT], arguments);
             }
             else
             {
-                CallOwnProcedure(methodNumber, arguments);
+                CallOwnProcedure(methodNumber, arguments, process);
             }
         }
 
-        public override void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue)
+        public override void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue, IBslProcess process)
         {
             if (MethodDefinedInScript(methodNumber))
             {
-                retValue = MachineInstance.Current.ExecuteMethod(this, methodNumber - METHOD_COUNT, arguments);
+                retValue = process.Run(this, _module, _module.Methods[methodNumber - METHOD_COUNT], arguments);
             }
             else
             {
-                retValue = CallOwnFunction(methodNumber, arguments);
+                retValue = CallOwnFunction(methodNumber, arguments, process);
             }
-            
         }
 
         public override int GetPropCount()
         {
-            return VARIABLE_COUNT + _module.ExportedProperies.Length;
+            return VARIABLE_COUNT + _module.Properties.Count;
         }
         
         public override int GetMethodsCount()
         {
-            return METHOD_COUNT + _module.ExportedMethods.Length;
+            return METHOD_COUNT + _module.Methods.Count(x => x.IsPublic);
         }
 
         public override string GetPropName(int propNum)
         {
             if(PropDefinedInScript(propNum))
             {
-                return _module.ExportedProperies[propNum - VARIABLE_COUNT].SymbolicName;
+                return _module.Properties[propNum - VARIABLE_COUNT].Name;
             }
             else
             {
@@ -380,25 +395,18 @@ namespace ScriptEngine.Machine.Contexts
 
         #endregion
 
-        public string[] GetExportedProperties()
+        public int FindAnyProperty(string name)
         {
-            return _module.ExportedProperies.Select(x => x.SymbolicName).ToArray();
+            int index;
+            if (_allPropertiesSearchCache.TryGetValue(name, out index))
+                return index;
+            else
+                throw PropertyAccessException.PropNotFoundException(name);
         }
 
-        public string[] GetExportedMethods()
+        protected static Exception BslProcessRequired()
         {
-            return _module.ExportedMethods.Select(x => x.SymbolicName).ToArray();
-        }
-
-        public Type ReflectAsCLRType()
-        {
-            throw new NotImplementedException();
-            //return ReflectedClassType.ReflectModule(_module, GetReflectedTypeName());
-        }
-
-        protected virtual string GetReflectedTypeName()
-        {
-            return SystemType.Name;
+            return new NotSupportedException("Implementation requires IBslProcess");
         }
     }
 }

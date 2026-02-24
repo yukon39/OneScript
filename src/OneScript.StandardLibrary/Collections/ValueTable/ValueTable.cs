@@ -1,0 +1,788 @@
+﻿/*----------------------------------------------------------
+This Source Code Form is subject to the terms of the 
+Mozilla Public License, v.2.0. If a copy of the MPL 
+was not distributed with this file, You can obtain one 
+at http://mozilla.org/MPL/2.0/.
+----------------------------------------------------------*/
+
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Localization;
+using OneScript.StandardLibrary.Collections.Exceptions;
+using OneScript.StandardLibrary.Collections.Indexes;
+using OneScript.Types;
+using OneScript.Values;
+using ScriptEngine.Machine;
+using ScriptEngine.Machine.Contexts;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace OneScript.StandardLibrary.Collections.ValueTable
+{
+    /// <summary>
+    /// Объект для работы с данными в табличном виде. 
+    /// Представляет из себя коллекцию строк с заранее заданной структурой.
+    /// </summary>
+    [ContextClass("ТаблицаЗначений", "ValueTable")]
+    public class ValueTable : AutoCollectionContext<ValueTable, ValueTableRow>, IIndexCollectionSource
+    {
+        private readonly List<ValueTableRow> _rows;
+
+        public ValueTable()
+        {
+            Columns = new ValueTableColumnCollection(this);
+            _rows = new List<ValueTableRow>();
+            Indexes = new CollectionIndexes(this);
+        }
+
+        /// <summary>
+        /// Коллекция колонок
+        /// </summary>
+        /// <value>КоллекцияКолонокТаблицыЗначений</value>
+        [ContextProperty("Колонки", "Columns")]
+        public ValueTableColumnCollection Columns { get; }
+
+        /// <summary>
+        /// Коллекция индексов
+        /// </summary>
+        /// <value>ИндексыКоллекции</value>
+        [ContextProperty("Индексы", "Indexes")]
+        public CollectionIndexes Indexes { get; }
+
+        /// <summary>
+        /// Количество строк в Таблице значений
+        /// </summary>
+        /// <returns>Число</returns>
+        [ContextMethod("Количество", "Count")]
+        public override int Count()
+        {
+            return _rows.Count;
+        }
+
+        /// <summary>
+        /// Добавляет строку в конец Таблицы значений
+        /// </summary>
+        /// <returns>СтрокаТаблицыЗначений</returns>
+        [ContextMethod("Добавить", "Add")]
+        public ValueTableRow Add()
+        {
+            var row = new ValueTableRow(this);
+            _rows.Add(row);
+            if (Indexes.Count() > 0) 
+                Indexes.ElementAdded(row);
+            return row;
+        }
+
+        /// <summary>
+        /// Вставляет строку в указанную позицию
+        /// </summary>
+        /// <param name="index">Число - Индекс позиции куда будет произведена вставка.
+        /// Если индекс вне размера Таблицы значений, строка добавляется в конец</param>
+        /// <returns>СтрокаТаблицыЗначений</returns>
+        [ContextMethod("Вставить", "Insert")]
+        public ValueTableRow Insert(int index)
+        {
+            if (index < 0 || index > _rows.Count)
+                return Add(); // для совместимости с 1С, хотя логичней было бы исключение
+
+            var row = new ValueTableRow(this);
+            _rows.Insert(index, row);
+
+            if (Indexes.Count() > 0)
+                Indexes.ElementAdded(row);
+            return row;
+        }
+
+        /// <summary>
+        /// Удаляет строку
+        /// </summary>
+        /// <param name="row">
+        /// СтрокаТаблицыЗначений - Удаляемая строка
+        /// Число - Индекс удаляемой строки
+        /// </param>
+        [ContextMethod("Удалить", "Delete")]
+        public void Delete(BslValue row)
+        {
+            var index = IndexByValue(row);
+            Indexes.ElementRemoved(_rows[index]);
+            _rows.RemoveAt(index);
+        }
+
+        /// <summary>
+        /// Загружает значения в колонку
+        /// </summary>
+        /// <param name="values">Массив - Значения для загрузки в колонку</param>
+        /// <param name="columnIndex">
+        /// Строка - Имя колонки для загрузки
+        /// Число - Индекс колонки для загрузки
+        /// КолонкаТаблицыЗначений - Колонка для загрузки
+        /// </param>
+        [ContextMethod("ЗагрузитьКолонку", "LoadColumn")]
+        public void LoadColumn(IValue values, IValue columnIndex)
+        {
+            // ValueTableColumn Column = Columns.GetColumnByIIndex(ColumnIndex);
+            var row_iterator = _rows.GetEnumerator();
+            var array_iterator = (values as ArrayImpl)?.GetEnumerator()
+                ?? throw RuntimeException.InvalidNthArgumentType(1);
+
+            Indexes.ClearIndexes();
+
+            while (row_iterator.MoveNext() && array_iterator.MoveNext())
+            {
+                row_iterator.Current.Set(columnIndex, array_iterator.Current);
+            }
+
+            Indexes.Rebuild();
+        }
+
+        /// <summary>
+        /// Выгружает значения колонки в новый массив
+        /// </summary>
+        /// <param name="column">
+        /// Строка - Имя колонки для выгрузки
+        /// Число - Индекс колонки для выгрузки
+        /// КолонкаТаблицыЗначений - Колонка для выгрузки
+        /// </param>
+        /// <returns>Массив</returns>
+        [ContextMethod("ВыгрузитьКолонку", "UnloadColumn")]
+        public ArrayImpl UnloadColumn(IValue column)
+        {
+            var result = new ArrayImpl();
+
+            foreach (var row in _rows)
+            {
+                result.Add(row.Get(column));
+            }
+
+            return result;
+        }
+
+         private List<ValueTableColumn> GetProcessingColumnList(string columnNames, bool emptyListInCaseOfNull = false)
+        {
+            var processing_list = new List<ValueTableColumn>();
+            if (string.IsNullOrEmpty(columnNames)) // Передали пустую строку вместо списка колонок
+            {
+                if (!emptyListInCaseOfNull)
+                {
+                    processing_list.AddRange(Columns);
+                }
+                return processing_list;
+            }
+
+            foreach (var column_name in columnNames.Split(','))
+            {
+                if (column_name == String.Empty)
+                    continue;
+
+                var name = column_name.Trim();
+
+                var Column = Columns.FindColumnByName(name);
+                if (Column == null)
+                    throw ColumnException.WrongColumnName(column_name);
+
+                if (processing_list.Find(x => x.Name == name) == null)
+                    processing_list.Add(Column);
+            }
+
+            return processing_list;
+        }
+
+        /// <summary>
+        /// Заполнить колонку/колонки указанным значением
+        /// </summary>
+        /// <param name="value">Произвольный - Устанавливаемое значение</param>
+        /// <param name="columnNames">Строка - Список имен колонок для установки значения (разделены запятыми).
+        /// Если параметр не указан или передана пустая строка, будут заполнены все колонки</param>
+        [ContextMethod("ЗаполнитьЗначения", "FillValues")]
+        public void FillValues(IValue value, string columnNames = null)
+        {
+            var processing_list = GetProcessingColumnList(columnNames);
+            Indexes.ClearIndexes();
+            foreach (var row in _rows)
+            {
+                foreach (var col in processing_list)
+                {
+                    row.Set(col, value);
+                }
+            }
+            Indexes.Rebuild();
+        }
+
+        /// <summary>
+        /// Получить индекс указанной строки
+        /// </summary>
+        /// <param name="row">СтрокаТаблицыЗначений - Строка таблицы значений, для которой необходимо определить индекс</param>
+        /// <returns>Число - Индекс в коллекции, если не найдено возвращает -1</returns>
+        [ContextMethod("Индекс", "IndexOf")]
+        public int IndexOf(IValue row)
+        {
+            if (row is ValueTableRow tableRow)
+                return _rows.IndexOf(tableRow);
+
+            throw RuntimeException.InvalidArgumentType();
+        }
+
+        /// <summary>
+        /// Сумма значений всех строк указанной колонки
+        /// </summary>
+        /// <param name="columnIndex">
+        /// Строка - Имя колонки для суммирования
+        /// Число - Индекс колонки для суммирования
+        /// КолонкаТаблицыЗначений - Колонка для суммирования
+        /// </param>
+        /// <remarks>
+        /// Если в колонке установлен тип и он единственный,
+        ///  то при суммировании будет попытка преобразования значения к типу Число.
+        /// <br/>Если колонке не присвоены типы 
+        ///  или в колонке несколько типов и среди них есть тип Число,
+        /// то в суммироваться будут только значения типа Число
+        /// <br/>Если в колонке несколько типов и среди них нет типа Число, то результатом будет Неопределено.
+        /// </remarks>
+        /// <returns>Число</returns>
+        [ContextMethod("Итог", "Total")]
+        public IValue Total(IValue columnIndex)
+        {
+            var column = Columns.GetColumnByIIndex(columnIndex);
+
+            var types = column.ValueType.Types();
+            if (types.Count() == 1)  // единственный тип
+            {
+                return TotalAllAsNumber(column);
+            }
+
+            if (types.Count() == 0 // нет типов
+                || types.Any(x => ((BslTypeValue)x).TypeValue == BasicTypes.Number)) // среди типов есть Число
+            {
+                return TotalNumbersOnly(column);
+            }
+
+            // несколько типов и нет типа Число
+            return ValueFactory.Create();
+        }
+
+        private IValue TotalAllAsNumber(ValueTableColumn column)
+        {
+            decimal result = 0;
+            foreach (var row in _rows)
+            {
+                try
+                {
+                    result += row.Get(column).AsNumber();
+                }
+                catch (RuntimeException)
+                {
+                    // игнорировать неприводимые к числу
+                }
+            }
+            return ValueFactory.Create(result);
+        }
+
+        private IValue TotalNumbersOnly(ValueTableColumn column)
+        {
+            decimal result = 0;
+            foreach (var row in _rows)
+            {
+                var current_value = row.Get(column);
+                if (current_value.SystemType == BasicTypes.Number)
+                {
+                    result += current_value.AsNumber();
+                }
+            }
+            return ValueFactory.Create(result);
+        }
+
+        /// <summary>
+        /// Осуществляет поиск значения в указанных колонках
+        /// </summary>
+        /// <param name="value">Произвольный - Искомое значение</param>
+        /// <param name="columnNames">Строка - Список имен колонок для поиска значения (разделены запятыми). 
+        /// Если параметр не указан - ищет по всем колонкам. По умолчанию: пустая строка</param>
+        /// <returns>СтрокаТаблицыЗначений - если строка найдена, иначе Неопределено</returns>
+        [ContextMethod("Найти", "Find")]
+        public IValue Find(IValue value, string columnNames = null)
+        {
+            var processing_list = GetProcessingColumnList(columnNames);
+            foreach (ValueTableRow row in _rows)
+            {
+                foreach (var col in processing_list)
+                {
+                    var current = row.Get(col);
+                    if (value.StrictEquals(current))
+                        return row;
+                }
+            }
+            return ValueFactory.Create();
+        }
+ 
+        private ValueTableColumn GetColumnOrThrow(string column_name)
+            => this.Columns.FindColumnByName(column_name)
+                ?? throw ColumnException.WrongColumnName(column_name);
+
+
+        private bool CheckFilterCriteria(ValueTableRow Row, StructureImpl Filter)
+        {
+            foreach (var kv in Filter)
+            {
+                var Column = GetColumnOrThrow(kv.Key.ToString());
+                IValue current = Row.Get(Column);
+                if (!current.StrictEquals(kv.Value))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Поиск строк по условию
+        /// </summary>
+        /// <param name="filter">Структура - Условия поиска. Ключ - имя колонки, значение - искомое значение</param>
+        /// <returns>Массив - Массив ссылок на строки, удовлетворяющих условию поиска</returns>
+        [ContextMethod("НайтиСтроки", "FindRows")]
+        public ArrayImpl FindRows(StructureImpl filter)
+        {
+            if (filter == null)
+                throw RuntimeException.InvalidArgumentType();
+
+            var result = new ArrayImpl();
+
+            var mapped = ColumnsMap(filter);
+            var suitableIndex = Indexes.FindSuitableIndex(mapped.Keys());
+            var dataToScan = suitableIndex?.GetData(mapped) ?? _rows;
+
+            foreach (var element in dataToScan)
+            {
+                var row = (ValueTableRow)element;
+                if (CheckFilterCriteria(row, filter))
+                    result.Add(row);
+            }
+
+            return result;
+        }
+
+        private MapImpl ColumnsMap(StructureImpl filter)
+        {
+            var result = new MapImpl();
+            foreach (var kv in filter)
+            {
+                var key = GetColumnOrThrow(kv.Key.ToString());
+                result.Insert(key, kv.Value);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Удаляет все строки. Структура колонок не меняется.
+        /// </summary>
+        [ContextMethod("Очистить", "Clear")]
+        public void Clear()
+        {
+            _rows.Clear();
+            Indexes.Clear();
+        }
+
+        /// <summary>
+        /// Получить строку по индексу
+        /// </summary>
+        /// <param name="index">Число - Индекс строки</param>
+        /// <returns>СтрокаТаблицыЗначений</returns>
+        [ContextMethod("Получить", "Get")]
+        public ValueTableRow Get(int index)
+        {
+            if (index < 0 || index >= Count())
+                throw RuntimeException.IndexOutOfRange();
+            return _rows[index];
+        }
+
+        /// <summary>
+        /// Сворачиваются (группируются) строки по указанным колонкам измерениям, суммируются колонки ресурсов. 
+        /// Колонки не указанные ни в измерениях ни в ресурсах удаляются.
+        /// </summary>
+        /// <param name="groupColumnNames">Строка - Имена колонок для сворачивания (изменения), разделены запятыми</param>
+        /// <param name="aggregateColumnNames">Строка - Имена колонок для суммирования (ресурсы), разделены запятыми</param>
+        [ContextMethod("Свернуть", "GroupBy")]
+        public void GroupBy(IBslProcess process, string groupColumnNames, string aggregateColumnNames = null)
+        {
+            var GroupColumns = GetProcessingColumnList(groupColumnNames, true);
+            var AggregateColumns = GetProcessingColumnList(aggregateColumnNames, true);
+
+            CheckMixedColumns(GroupColumns, AggregateColumns);
+
+            var uniqueRows = new Dictionary<ValueTableRow, ValueTableRow>(new RowsByColumnsEqComparer(process, GroupColumns));
+            int new_idx = 0;
+
+            foreach (var row in _rows)
+            {
+                if (!uniqueRows.TryGetValue(row, out var destination))
+                {
+                    destination = _rows[new_idx++];
+                    CopyRowData(row, destination, GroupColumns);
+                    CopyRowData(row, destination, AggregateColumns);
+                    uniqueRows.Add(destination, destination);
+                }
+                else
+                {
+                    AppendRowData(row, destination, AggregateColumns);
+                }
+            }
+
+            _rows.RemoveRange(new_idx, _rows.Count - new_idx);
+
+            int i = 0;
+            while (i < Columns.Count())
+            {
+                var column = Columns.FindColumnByIndex(i);
+                if (GroupColumns.IndexOf(column) == -1 && AggregateColumns.IndexOf(column) == -1)
+                    Columns.Delete(column);
+                else
+                    ++i;
+            }
+        }
+
+        private static void CheckMixedColumns(List<ValueTableColumn> groupColumns, List<ValueTableColumn> aggregateColumns)
+        {
+            foreach (var groupColumn in groupColumns)
+                if (aggregateColumns.Find(x => x.Name == groupColumn.Name) != null)
+                    throw ColumnException.ColumnsMixed(groupColumn.Name);
+        }
+
+        private static void CopyRowData(ValueTableRow source, ValueTableRow dest, IEnumerable<ValueTableColumn> columns)
+        {
+            foreach (var column in columns)
+                dest.Set(column, source.Get(column));
+        }
+
+        private static void AppendRowData(ValueTableRow source, ValueTableRow dest, IEnumerable<ValueTableColumn> columns)
+        {
+            foreach (var column in columns)
+            {
+                var value1 = GetNumeric(source, column);
+                var value2 = GetNumeric(dest, column);
+                dest.Set(column, BslNumericValue.Create(value1 + value2));
+            }
+        }
+
+        private static decimal GetNumeric(ValueTableRow row, ValueTableColumn column)
+        {
+            var value = row.Get(column);
+            return value.SystemType == BasicTypes.Number ? value.AsNumber() : 0;
+        }
+
+        private class RowsByColumnsEqComparer : IEqualityComparer<ValueTableRow>
+        {
+            private readonly IBslProcess _process;
+            private readonly List<ValueTableColumn> _columns;
+
+            public RowsByColumnsEqComparer(IBslProcess process, List<ValueTableColumn> columns)
+            {
+                _process = process;
+                _columns = columns;
+            }
+
+            public bool Equals(ValueTableRow row1, ValueTableRow row2)
+            {
+                foreach (var column in _columns)
+                {
+                    if (!row1.Get(column).Equals(row2.Get(column)))
+                        return false;
+                }
+                return true;
+            }
+
+            public int GetHashCode(ValueTableRow row)
+            {
+                int hash = 0;
+                foreach (var column in _columns)
+                    hash ^= row.Get(column).AsString(_process).GetHashCode();
+                return hash;
+            }
+        }
+
+        private int IndexByValue(BslValue item)
+        {
+            int index;
+
+            if (item is ValueTableRow row)
+            {
+                index = IndexOf(row);
+                if (index == -1)
+                    throw ValueTableException.RowDoesntBelongTo();
+            }
+            else
+            {
+                try
+                {
+                    index = decimal.ToInt32(item.AsNumber());
+                }
+                catch (RuntimeException)
+                {
+                    throw RuntimeException.InvalidArgumentType();
+                }
+
+                if (index < 0 || index >= _rows.Count)
+                    throw RuntimeException.IndexOutOfRange();
+            }
+
+            return index;
+        }
+
+        /// <summary>
+        /// Сдвигает строку на указанное количество позиций.
+        /// </summary>
+        /// <param name="row">
+        /// СтрокаТаблицыЗначений - Строка которую сдвигаем
+        /// Число - Индекс сдвигаемой строки
+        /// </param>
+        /// <param name="offset">Количество строк, на которое сдвигается строка.
+        /// Если значение положительное - сдвиг вниз, иначе вверх</param>
+        [ContextMethod("Сдвинуть", "Move")]
+        public void Move(BslValue row, int offset)
+        {
+            int index_source = IndexByValue(row);
+
+            int index_dest = index_source + offset;
+
+            if (index_dest < 0 || index_dest >= _rows.Count)
+                throw RuntimeException.IncorrectOffset();
+
+            ValueTableRow tmp = _rows[index_source];
+
+            if (index_source < index_dest)
+            {
+                _rows.Insert(index_dest + 1, tmp);
+                _rows.RemoveAt(index_source);
+            }
+            else
+            {
+                _rows.RemoveAt(index_source);
+                _rows.Insert(index_dest, tmp);
+            }
+        }
+
+        /// <summary>
+        /// Создает новую таблицу значений с указанными колонками. Данные не копируются.
+        /// </summary>
+        /// <param name="columnNames">Строка - Имена колонок для копирования, разделены запятыми
+        /// Если параметр не указан или передана пустая строка, будут скопированы все колонки</param>
+        /// <returns>ТаблицаЗначений</returns>
+        [ContextMethod("СкопироватьКолонки", "CopyColumns")]
+        public ValueTable CopyColumns(string columnNames = null)
+        {
+            var Result = new ValueTable();
+            var columns = GetProcessingColumnList(columnNames);
+
+            foreach (var Column in columns)
+            {
+                Result.Columns.Add(Column.Name, Column.ValueType, Column.Title, Column.Width);
+            }
+
+            return Result;
+        }
+
+        /// <summary>
+        /// Создает новую таблицу значений с указанными строками и колонками. Если передан отбор - копирует строки удовлетворяющие отбору.
+        /// Если не указаны строки - будут скопированы все строки. Если не указаны колонки - будут скопированы все колонки.
+        /// Если не указаны оба параметра - будет создана полная копия таблицы значений.
+        /// </summary>
+        /// <param name="rows">
+        /// Массив - Массив строк для отбора
+        /// Структура - Параметры отбора. Ключ - Колонка, Значение - Значение отбора
+        /// </param>
+        /// <param name="columnNames">Строка - Имена колонок для копирования, разделены запятыми</param>
+        /// <returns>ТаблицаЗначений</returns>
+        [ContextMethod("Скопировать", "Copy")]
+        public ValueTable Copy(IValue rows = null, string columnNames = null)
+        {
+            var result = CopyColumns(columnNames);
+            var columns = GetProcessingColumnList(columnNames);
+
+            IEnumerable<ValueTableRow> requestedRows = rows switch
+            {
+                null => _rows,
+                StructureImpl structure => FindRows(structure).Select(x => x as ValueTableRow),
+                ArrayImpl array => GetRowsEnumByArray(array),
+                _ => throw RuntimeException.InvalidArgumentType(),
+            };
+
+            var columnMap = new Dictionary<ValueTableColumn, ValueTableColumn>();
+            foreach (var column in columns)
+            {
+                var destinationColumn = result.Columns.FindColumnByName(column.Name);
+                columnMap.Add(column, destinationColumn);
+            }
+
+            foreach (var row in requestedRows)
+            {
+                var new_row = result.Add();
+                foreach (var Column in columns)
+                {
+                    new_row.Set(columnMap[Column], row.Get(Column));
+                }
+            }
+
+            return result;
+        }
+
+        private IEnumerable<ValueTableRow> GetRowsEnumByArray(ArrayImpl rowsArray)
+        {
+            if (rowsArray == null)
+                throw RuntimeException.InvalidArgumentType();
+
+            return rowsArray.Select(x => x is ValueTableRow vtr && vtr.Owner() == this ? vtr
+                : throw RuntimeException.InvalidArgumentValue());
+        }
+
+        private struct ValueTableSortRule
+        {
+            public ValueTableColumn Column;
+            public int direction; // 1 = asc, -1 = desc
+        }
+
+        private List<ValueTableSortRule> GetSortRules(string Columns)
+        {
+
+            string[] a_columns = Columns.Split(',');
+
+            List<ValueTableSortRule> Rules = new List<ValueTableSortRule>();
+
+            foreach (string column in a_columns)
+            {
+                string[] description = column.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (description.Length == 0)
+                    throw ColumnException.WrongColumnName();
+                if (description.Length > 2)
+                    throw RuntimeException.InvalidNthArgumentValue(1);
+
+                var sortColumn = GetColumnOrThrow(description[0]);
+                var rule = new ValueTableSortRule
+                {
+                    Column = sortColumn,
+                    direction = (description.Length > 1 && description[1].BilingualEquals("УБЫВ", "DESC")) ? -1 : 1
+                };
+
+                Rules.Add(rule);
+            }
+
+            return Rules;
+        }
+
+        private class RowComparator : IComparer<ValueTableRow>
+        {
+            readonly List<ValueTableSortRule> Rules;
+
+            readonly GenericIValueComparer _comparer;
+
+            public RowComparator(IBslProcess process, List<ValueTableSortRule> Rules)
+            {
+                if (Rules.Count == 0)
+                    throw RuntimeException.InvalidArgumentValue();
+
+                this.Rules = Rules;
+                _comparer = new GenericIValueComparer(process);
+            }
+
+            private int OneCompare(ValueTableRow x, ValueTableRow y, ValueTableSortRule Rule)
+            {
+                IValue xValue = x.Get(Rule.Column);
+                IValue yValue = y.Get(Rule.Column);
+
+                int result = _comparer.Compare(xValue, yValue) * Rule.direction;
+
+                return result;
+            }
+
+            public int Compare(ValueTableRow x, ValueTableRow y)
+            {
+                int i = 0, r;
+                while ((r = OneCompare(x, y, Rules[i])) == 0)
+                {
+                    if (++i >= Rules.Count)
+                        return 0;
+                }
+
+                return r;
+            }
+        }
+
+        /// <summary>
+        /// Сортировать строки в таблице значений. Строки сортируются по порядку следования колонок для сортировки, с учетом варианта сортировки.
+        /// </summary>
+        /// <param name="columns">Строка - Имена колонок для сортировки. 
+        /// После имени колонки, через пробел, можно указать направление сортировки: "Убыв" ("Desc") - по убыванию. Возр" ("Asc") - по возрастанию
+        /// По умолчанию - по возрастанию.
+        /// </param>
+        /// <param name="comparator">СравнениеЗначений - правила сравнения значений при наличии различных типов данных в колонке.</param>
+        [ContextMethod("Сортировать", "Sort")]
+        public void Sort(IBslProcess process, string columns, IValue comparator = null)
+        {
+            _rows.Sort(new RowComparator(process, GetSortRules(columns)));
+        }
+
+        /// <summary>
+        /// Не поддерживается
+        /// </summary>
+        /// <param name="title"></param>
+        /// <param name="startRow"></param>
+        [ContextMethod("ВыбратьСтроку", "ChooseRow")]
+        public void ChooseRow(string title = null, IValue startRow = null)
+        {
+            throw new NotSupportedException();
+        }
+
+        IEnumerator<PropertyNameIndexAccessor> IEnumerable<PropertyNameIndexAccessor>.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+
+        public override IEnumerator<ValueTableRow> GetEnumerator()
+        {
+            foreach (var item in _rows)
+            {
+                yield return item;
+            }
+        }
+
+        public override IValue GetIndexedValue(IValue index)
+        {
+            return Get((int)index.AsNumber());
+        }
+
+        [ScriptConstructor]
+        public static ValueTable Constructor()
+        {
+            return new ValueTable();
+        }
+
+        public string GetName(IValue field)
+        {
+            if (field is ValueTableColumn column)
+                return column.Name;
+            throw RuntimeException.InvalidArgumentType(nameof(field));
+        }
+
+        public IValue GetField(string name)
+        {
+            return Columns.FindColumnByName(name);
+        }
+    }
+
+    public sealed class ValueTableException : RuntimeException
+    {
+        public ValueTableException(BilingualString message, Exception innerException) : base(message,
+            innerException)
+        {
+        }
+
+        public ValueTableException(BilingualString message) : base(message)
+        {
+        }
+
+        public static ValueTableException RowDoesntBelongTo()
+        {
+            return new ValueTableException(new BilingualString(
+                "Строка не принадлежит таблице значений",
+                "Row does not belong to table"));
+        }
+    }
+}

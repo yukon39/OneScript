@@ -3,16 +3,20 @@
   <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
 
   <PropertyGroup>
-    <TargetFrameworks>net452</TargetFrameworks>
     <AssemblyName>OneScript.DebugProtocol</AssemblyName>
-    <Configurations>Debug;Release;ReleaseNetStandard</Configurations>
-    <AssemblyTitle>1Script Debug Protocol DTO</AssemblyTitle>
+    <Configurations>Debug;Release;LinuxDebug</Configurations>
+    <AssemblyTitle>1Script Debug Protocol common objects and DTO's</AssemblyTitle>
+    <Platforms>AnyCPU</Platforms>
+    <!--Нацеливание на net4 нужно для сборки дебаг-адаптера под net4 без лишних DLL-->
+    <TargetFrameworks>net48;$(TargetFrameworkVersion)</TargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+    <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+    <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="System.ServiceModel" />
-  </ItemGroup>
-  <ItemGroup>
-    <Folder Include="Properties\" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.2" />
   </ItemGroup>
 </Project>

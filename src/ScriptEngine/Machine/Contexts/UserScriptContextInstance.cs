@@ -6,70 +6,97 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using OneScript.Commons;
+using OneScript.Compilation;
+using OneScript.Compilation.Binding;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Localization;
+using OneScript.Types;
+using OneScript.Values;
+using ScriptEngine.Types;
 
 namespace ScriptEngine.Machine.Contexts
 {
-    public class UserScriptContextInstance : ScriptDrivenObject
+    [ContextClass("Сценарий", "Script")]
+    public class UserScriptContextInstance : ThisAwareScriptedObjectBase, IDebugPresentationAcceptor
     {
-        readonly LoadedModule _module;
+        public static readonly BilingualString OnInstanceCreationTerms =
+            new BilingualString("ПриСозданииОбъекта", "OnObjectCreate");
+        
+        public static readonly BilingualString PresentationGetProcessingTerms =
+            new BilingualString("ОбработкаПолученияПредставления", "PresentationGetProcessing");
+        
+        public static readonly BilingualString RaiseEventTerms =
+            new BilingualString("ВызватьСобытие", "RaiseEvent");
+
+        private const int RAIZEEVENT_INDEX = 0;
+        
         Dictionary<string, int> _ownPropertyIndexes;
         List<IValue> _ownProperties;
 
-        private Func<string> _asStringOverride;
+        private Func<IBslProcess, string> _asStringOverride;
+
         
-        public IValue[] ConstructorParams { get; private set; }
-        
-        static UserScriptContextInstance()
+        public UserScriptContextInstance(IExecutableModule module, bool deferred = false) : base(module, deferred)
         {
-            TypeManager.RegisterType("Сценарий", typeof(UserScriptContextInstance));
+            ConstructorParams = Array.Empty<IValue>();
+            DefineType(GetType().GetTypeFromClassMarkup());
         }
 
-        public UserScriptContextInstance(LoadedModule module) : base(module)
-        {
-            _module = module;
-            ConstructorParams = new IValue[0];
-        }
-
-        public UserScriptContextInstance(LoadedModule module, string asObjectOfType, IValue[] args = null)
+        public UserScriptContextInstance(IExecutableModule module, TypeDescriptor asObjectOfType, IValue[] args = null)
             : base(module, true)
         {
-            DefineType(TypeManager.GetTypeByName(asObjectOfType));
-            _module = module;
+            DefineType(asObjectOfType);
 
             ConstructorParams = args;
             if (args == null)
             {
-                ConstructorParams = new IValue[0];
+                ConstructorParams = Array.Empty<IValue>();
             }
-
         }
+        
+        private IValue[] ConstructorParams { get; }
 
-        protected override void OnInstanceCreation()
+        protected override void OnInstanceCreation(IBslProcess process)
         {
             ActivateAsStringOverride();
 
-            base.OnInstanceCreation();
-            var methId = GetScriptMethod("ПриСозданииОбъекта", "OnObjectCreate");
-            int constructorParamsCount = ConstructorParams.Count();
+            base.OnInstanceCreation(process);
+            var methId = GetScriptMethod(OnInstanceCreationTerms.Russian, OnInstanceCreationTerms.English);
+            int constructorParamsCount = ConstructorParams.Length;
 
             if (methId > -1)
             {
-                var procInfo = GetMethodInfo(methId);
+                var procInfo = GetMethodInfo(GetOwnMethodCount()+methId);
 
-                int procParamsCount = procInfo.Params.Count();
-
-                int reqParamsCount = procInfo.Params.Count(x => !x.HasDefaultValue);
+                var parameters = procInfo.GetParameters();
+                int procParamsCount = parameters.Length;
+                int reqParamsCount = parameters.Count(x => !x.HasDefaultValue);
 
                 if (constructorParamsCount < reqParamsCount || constructorParamsCount > procParamsCount)
                     throw new RuntimeException("Параметры конструктора: "
                         + "необходимых параметров: " + Math.Min(procParamsCount, reqParamsCount).ToString()
                         + ", передано параметров " + constructorParamsCount.ToString()
                         );
-                else if (procInfo.Params.Skip(constructorParamsCount).Any(param => !param.HasDefaultValue))
-                    throw RuntimeException.TooLittleArgumentsPassed();
+                else if (parameters.Skip(constructorParamsCount).Any(param => !param.HasDefaultValue))
+                    throw RuntimeException.TooFewArgumentsPassed();
 
-                CallAsProcedure(methId, ConstructorParams);
+                if (constructorParamsCount < procParamsCount)
+                {
+                    var ctorParameters = new IValue[procParamsCount];
+                    ConstructorParams.CopyTo(ctorParameters, 0);
+                    for (int i = constructorParamsCount; i < procParamsCount; i++)
+                    {
+                        ctorParameters[i] = (IValue)parameters[i].DefaultValue;
+                    }
+                    CallScriptMethod(methId, ctorParameters, process);
+                }
+                else
+                    CallScriptMethod(methId, ConstructorParams, process);
             }
             else
             {
@@ -79,23 +106,28 @@ namespace ScriptEngine.Machine.Contexts
                 }
             }
         }
+        
+        public override string ToString(IBslProcess process)
+        {
+            return _asStringOverride(process);
+        }
 
         private void ActivateAsStringOverride()
         {
-            var methId = GetScriptMethod("ОбработкаПолученияПредставления", "PresentationGetProcessing");
+            var methId = GetScriptMethod(PresentationGetProcessingTerms.Russian, PresentationGetProcessingTerms.English);
             if (methId == -1)
-                _asStringOverride = base.AsString;
+                _asStringOverride = base.ToString;
             else
             {
-                var signature = GetMethodInfo(methId);
-                if (signature.ArgCount != 2)
+                var signature = GetMethodInfo(GetOwnMethodCount()+methId);
+                if (signature.GetParameters().Length != 2)
                     throw new RuntimeException("Обработчик получения представления должен иметь 2 параметра");
 
-                _asStringOverride = () => GetOverridenPresentation(methId);
+                _asStringOverride = (p) => GetOverridenPresentation(methId, p);
             }
         }
 
-        private string GetOverridenPresentation(int methId)
+        private string GetOverridenPresentation(int methId, IBslProcess process)
         {
             var standard = ValueFactory.Create(true);
             var strValue = ValueFactory.Create();
@@ -106,12 +138,19 @@ namespace ScriptEngine.Machine.Contexts
                 Variable.Create(standard, "standardProcessing")
             };
 
-            CallScriptMethod(methId, arguments);
+            CallScriptMethod(methId, arguments, process);
 
             if (arguments[1].AsBoolean() == true)
-                return base.AsString();
+                return base.ToString(process);
 
-            return arguments[0].AsString();
+            if (arguments[0].SystemType != BasicTypes.String && arguments[0].SystemType != BasicTypes.Undefined)
+            {
+                throw new RuntimeException(new BilingualString(
+                    $"Полученное представление имеет тип {arguments[0].SystemType}. Ожидается тип Строка",
+                    $"Returned presentation has type {arguments[0].SystemType}. Expected type is String"));
+            }
+
+            return arguments[0].ToString();
         }
 
         public void AddProperty(string name, string alias, IValue value)
@@ -122,7 +161,7 @@ namespace ScriptEngine.Machine.Contexts
                 _ownPropertyIndexes = new Dictionary<string, int>();
             }
 
-            var newIndex = _ownProperties.Count;
+            var newIndex = _ownProperties.Count + base.GetOwnVariableCount();
             _ownPropertyIndexes.Add(name, newIndex);
             if (!string.IsNullOrEmpty(alias))
             {
@@ -139,53 +178,172 @@ namespace ScriptEngine.Machine.Contexts
 
         protected override int GetOwnMethodCount()
         {
-            return 0;
+            return 1;
+        }
+
+        protected override int FindOwnMethod(string name)
+        {
+            return RaiseEventTerms.HasName(name) ? RAIZEEVENT_INDEX : base.FindOwnMethod(name);
+        }
+
+        protected override int FindOwnProperty(string name)
+        {
+            if (_ownPropertyIndexes != default && _ownPropertyIndexes.TryGetValue(name, out var index))
+            {
+                return index;
+            }
+
+            return base.FindOwnProperty(name);
+        }
+
+        protected override BslMethodInfo GetOwnMethod(int index)
+        {
+            Debug.Assert(index == RAIZEEVENT_INDEX);
+
+            return GetOwnMethodsDefinition()[RAIZEEVENT_INDEX];
+        }
+
+        protected override BslPropertyInfo GetOwnPropertyInfo(int index)
+        {
+            if (index == THISOBJ_VARIABLE_INDEX)
+                return base.GetOwnPropertyInfo(index);
+            
+            var names = _ownPropertyIndexes.Where(x => x.Value == index)
+                .Select(x => x.Key)
+                .ToArray();
+            
+            Debug.Assert(names.Length > 0 && names.Length <= 2);
+            
+            var builder = BslPropertyBuilder.Create()
+                .Name(names[0]);
+            if (names.Length == 2)
+            {
+                builder.Alias(names[1]);
+            }
+
+            builder.SetDispatchingIndex(index);
+
+            return builder.Build();
+        }
+
+        [SymbolsProvider]
+        private static void PrepareCompilation(TypeSymbolsProviderFactory providerFactory, SymbolScope scope)
+        {
+            var baseSymbols = providerFactory.Get<ThisAwareScriptedObjectBase>();
+            baseSymbols.FillSymbols(scope);
+            GetOwnMethodsDefinition().ForEach(x => scope.DefineMethod(x.ToSymbol()));
+        }
+        
+        private static BslMethodInfo[] GetOwnMethodsDefinition()
+        {
+            var methodBuilder = BslMethodBuilder.Create();
+            methodBuilder.SetNames(RaiseEventTerms.Russian, RaiseEventTerms.English)
+                .DeclaringType(typeof(UserScriptContextInstance));
+
+            methodBuilder.NewParameter()
+                .Name("eventName")
+                .ParameterType(typeof(string));
+
+            methodBuilder.NewParameter()
+                .Name("eventArgs")
+                .ParameterType(typeof(BslValue[]))
+                .DefaultValue(BslSkippedParameterValue.Instance);
+
+            return new BslMethodInfo[]{methodBuilder.Build()};
+        }
+
+        protected override void CallOwnProcedure(int index, IValue[] arguments, IBslProcess process)
+        {
+            Debug.Assert(index == RAIZEEVENT_INDEX);
+            var eventProcessor = process.Services.TryResolve<IEventProcessor>();
+            if (eventProcessor == default)
+                return;
+
+            var eventName = arguments[0].ExplicitString();
+            IValue[] eventArgs = null;
+            if (arguments.Length > 1)
+            {
+                if (arguments[1].AsObject() is IEnumerable<IValue> argsArray)
+                {
+                    eventArgs = argsArray.ToArray();
+                }
+            }
+
+            if (eventArgs == null)
+                eventArgs = new IValue[0];
+            
+            eventProcessor.HandleEvent(this, eventName, eventArgs, process);
         }
 
         protected override int GetOwnVariableCount()
         {
-            if (_ownProperties == null)
-                return 0;
-            else
-                return _ownProperties.Count;
-        }
-
-        protected override void UpdateState()
-        {
+            return base.GetOwnVariableCount() + (_ownProperties?.Count ?? 0);
         }
 
         protected override bool IsOwnPropReadable(int index)
         {
             if (_ownProperties == null)
-                return false;
+                return base.IsOwnPropReadable(index);
 
-            if (index >= 0 && index < _ownProperties.Count)
+            var baseProps = base.GetOwnVariableCount(); 
+            if (index >= baseProps)
                 return true;
             else
-                return false;
+                return base.IsOwnPropReadable(index);
+        }
+
+        protected override bool IsOwnPropWritable(int index)
+        {
+            if (_ownProperties == null)
+                return base.IsOwnPropWritable(index);
+
+            return false;
         }
 
         protected override IValue GetOwnPropValue(int index)
         {
-            return _ownProperties[index];
+            var baseProps = base.GetOwnVariableCount(); 
+            if (index >= baseProps)
+                return _ownProperties[index-baseProps];
+            else
+                return base.GetOwnPropValue(index);
         }
         
         protected override string GetOwnPropName(int index)
         {
-            if (_ownProperties == null)
-                throw new ArgumentException("Unknown property index");
-
-            return _ownPropertyIndexes.Where(x => x.Value == index).First().Key;
+            if (_ownProperties == null || index < base.GetOwnVariableCount())
+                return base.GetOwnPropName(index);
+            
+            return _ownPropertyIndexes.First(x => x.Value == index).Key;
         }
         
         public override int GetMethodsCount()
         {
-            return _module.Methods.Length;
+            return GetOwnMethodCount() + Module.Methods.Count;
         }
 
-        public override string AsString()
+        void IDebugPresentationAcceptor.Accept(IDebugValueVisitor visitor)
         {
-            return _asStringOverride();
+            var instanceProps = this.GetProperties()
+                .OfType<BslScriptPropertyInfo>()
+                .Where(p => p.DispatchId != THISOBJ_VARIABLE_INDEX)
+                .OrderBy(x => x.DispatchId)
+                .ToDictionary(x => x.Name, x => x.DispatchId);
+
+            var instanceFields = Module
+                .Fields
+                .OfType<BslScriptFieldInfo>()
+                .OrderBy(x => x.DispatchId)
+                .Where(x => !instanceProps.ContainsKey(x.Name))
+                .ToDictionary(x => $"${x.Name}", x => x.DispatchId);
+
+            var props = instanceProps
+                .Concat(instanceFields)
+                .Select(x => 
+                    Variable.Create(GetPropValue(x.Value), x.Key))
+                .ToList();
+
+            visitor.ShowCustom(props);
         }
     }
 }

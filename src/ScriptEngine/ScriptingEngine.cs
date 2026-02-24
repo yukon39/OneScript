@@ -1,104 +1,160 @@
-﻿/*----------------------------------------------------------
+/*----------------------------------------------------------
 This Source Code Form is subject to the terms of the 
 Mozilla Public License, v.2.0. If a copy of the MPL 
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
-using System.Collections.Generic;
-using System.Linq;
-
-using ScriptEngine.Environment;
+using OneScript.Compilation;
+using OneScript.Contexts;
+using OneScript.DependencyInjection;
+using OneScript.Execution;
+using OneScript.Types;
 using ScriptEngine.Machine;
 using ScriptEngine.Machine.Contexts;
 using ScriptEngine.Compiler;
+using ScriptEngine.Libraries;
+using ScriptEngine.Machine.Debugger;
 
 namespace ScriptEngine
 {
     public class ScriptingEngine : IDisposable
     {
-        private readonly MachineInstance _machine;
-        private readonly ScriptSourceFactory _scriptFactory;
         private AttachedScriptsFactory _attachedScriptsFactory;
-        private IDebugController _debugController;
+        private IRuntimeEnvironment _runtimeEnvironment;
+        
+        private readonly ILibraryManager _libraryManager;
 
-        public ScriptingEngine()
+        public ScriptingEngine(ITypeManager types,
+            IGlobalsManager globals,
+            RuntimeEnvironment env, 
+            OneScriptCoreOptions options,
+            IDebugger debugger,
+            IServiceContainer services)
         {
-            _machine = MachineInstance.Current;
-
-            TypeManager.Initialize(new StandartTypeManager());
-            GlobalsManager.Reset();
-            ContextDiscoverer.DiscoverClasses(System.Reflection.Assembly.GetExecutingAssembly());
+            TypeManager = types;
+            // FIXME: Пока потребители не отказались от статических инстансов, они будут жить и здесь
             
-            _scriptFactory = new ScriptSourceFactory();
+            GlobalsManager = globals;
+            _runtimeEnvironment = env;
+            _libraryManager = env;
+            
+            Loader = new ScriptSourceFactory();
+            Services = services;
+            ContextDiscoverer = new ContextDiscoverer(types, globals, services);
+            
+            Debugger = debugger;
+
+            if (debugger.IsEnabled)
+            {
+                ProduceExtraCode |= CodeGenerationFlags.DebugCode;
+            }
+            
+            Loader.ReaderEncoding = options.FileReaderEncoding;
         }
 
-        public CodeGenerationFlags ProduceExtraCode { get; set; }
+        public IServiceContainer Services { get; }
 
-        public void AttachAssembly(System.Reflection.Assembly asm)
+        private ContextDiscoverer ContextDiscoverer { get; }
+
+        public IRuntimeEnvironment Environment => _runtimeEnvironment;
+
+        public ILibraryManager LibraryManager => _libraryManager;
+
+        public ITypeManager TypeManager { get; }
+        
+        public IGlobalsManager GlobalsManager { get; }
+        
+        private CodeGenerationFlags ProduceExtraCode { get; set; }
+        
+        public void AttachAssembly(System.Reflection.Assembly asm, Predicate<Type> filter = null)
         {
-            ContextDiscoverer.DiscoverClasses(asm);
+            ContextDiscoverer.DiscoverClasses(asm, filter);
+            ContextDiscoverer.DiscoverGlobalContexts(Environment, asm, filter);
         }
 
-        public void AttachAssembly(System.Reflection.Assembly asm, RuntimeEnvironment globalEnvironment)
+        public void AttachExternalAssembly(System.Reflection.Assembly asm, IRuntimeEnvironment globalEnvironment)
         {
             ContextDiscoverer.DiscoverClasses(asm);
+
+            //var lastCount = globalEnvironment.AttachedContexts.Count();
             ContextDiscoverer.DiscoverGlobalContexts(globalEnvironment, asm);
-        }
 
-        public RuntimeEnvironment Environment { get; set; }
+            //var newCount = globalEnvironment.AttachedContexts.Count();
+            // while (lastCount < newCount)
+            // {
+            //     MachineInstance.Current.AttachContext(globalEnvironment.AttachedContexts[lastCount]);
+            //     ++lastCount;
+            // }
+        }
+        
+        public void AttachExternalAssembly(System.Reflection.Assembly asm)
+        {
+            AttachExternalAssembly(asm, Environment);
+        }
 
         public void Initialize()
         {
             SetDefaultEnvironmentIfNeeded();
-
-            UpdateContexts();
+            EnableCodeStatistics();
+            //UpdateContexts();
 
             _attachedScriptsFactory = new AttachedScriptsFactory(this);
             AttachedScriptsFactory.SetInstance(_attachedScriptsFactory);
         }
 
-        public void UpdateContexts()
-        {
-            Environment.LoadMemory(_machine);
-        }
+        // public void UpdateContexts()
+        // {
+        //     lock (this)
+        //     {
+        //         ExecutionDispatcher.Current ??= Services.Resolve<ExecutionDispatcher>();
+        //     }
+        //     MachineInstance.Current.SetMemory(Services.Resolve<ExecutionContext>());
+        // }
 
         private void SetDefaultEnvironmentIfNeeded()
         {
-            if (Environment == null)
-                Environment = new RuntimeEnvironment();
+            _runtimeEnvironment ??= new RuntimeEnvironment();
         }
 
-        public ICodeSourceFactory Loader
+        public ScriptSourceFactory Loader { get; }
+
+        public ICompilerFrontend GetCompilerService()
         {
-            get
+            using var scope = Services.CreateScope();
+            var compiler = scope.Resolve<CompilerFrontend>();
+            compiler.SharedSymbols = _runtimeEnvironment.GetSymbolTable();
+            
+            switch (System.Environment.OSVersion.Platform)
             {
-                return _scriptFactory;
+                case PlatformID.Unix:
+                    compiler.PreprocessorDefinitions.Add("Linux");
+                    break;
+                case PlatformID.MacOSX:
+                    compiler.PreprocessorDefinitions.Add("MacOS");
+                    break;
+                case PlatformID.Win32NT:
+                    compiler.PreprocessorDefinitions.Add("Windows");
+                    break;
             }
-        }
-
-        public IDirectiveResolver DirectiveResolver { get; set; }
-
-        public CompilerService GetCompilerService()
-        {
-            var cs = new CompilerService(Environment.SymbolsContext);
-            cs.ProduceExtraCode = ProduceExtraCode;
-            cs.DirectiveResolver = DirectiveResolver;
-            return cs;
+            
+            compiler.GenerateDebugCode = ProduceExtraCode.HasFlag(CodeGenerationFlags.DebugCode);
+            compiler.GenerateCodeStat = ProduceExtraCode.HasFlag(CodeGenerationFlags.CodeStatistics);
+            return compiler;
         }
         
-        public IRuntimeContextInstance NewObject(LoadedModule module, ExternalContextData externalContext = null)
+        public UserScriptContextInstance NewObject(IExecutableModule module, IBslProcess process,
+            ExternalContextData externalContext = null)
         {
             var scriptContext = CreateUninitializedSDO(module, externalContext);
-            InitializeSDO(scriptContext);
+            InitializeSDO(scriptContext, process);
 
             return scriptContext;
         }
 
-        private ScriptDrivenObject CreateUninitializedSDO(LoadedModule module, ExternalContextData externalContext = null)
+        public UserScriptContextInstance CreateUninitializedSDO(IExecutableModule module, ExternalContextData externalContext = null)
         {
-            var scriptContext = new Machine.Contexts.UserScriptContextInstance(module);
-            scriptContext.AddProperty("ЭтотОбъект", "ThisObject", scriptContext);
+            var scriptContext = new UserScriptContextInstance(module, true);
             if (externalContext != null)
             {
                 foreach (var item in externalContext)
@@ -111,79 +167,22 @@ namespace ScriptEngine
             return scriptContext;
         }
 
-        [Obsolete]
-        public IRuntimeContextInstance NewObject(LoadedModuleHandle module)
+        public void InitializeSDO(ScriptDrivenObject sdo, IBslProcess process)
         {
-            return NewObject(module.Module); 
+            sdo.Initialize(process);
         }
+        
+        public AttachedScriptsFactory AttachedScriptsFactory => _attachedScriptsFactory;
 
-        [Obsolete]
-        public IRuntimeContextInstance NewObject(LoadedModuleHandle module, ExternalContextData externalContext)
-        {
-            return NewObject(module.Module, externalContext);
-        }
+        public IDebugger Debugger { get; }
 
-        [Obsolete]
-        public LoadedModuleHandle LoadModuleImage(ScriptModuleHandle moduleImage)
+        private void EnableCodeStatistics()
         {
-            var handle = new LoadedModuleHandle();
-            handle.Module = new LoadedModule(moduleImage.Module);
-            return handle;
-        }
-
-        public LoadedModule LoadModuleImage(ModuleImage moduleImage)
-        {
-            return new LoadedModule(moduleImage);
-        }
-
-        public void InitializeSDO(ScriptDrivenObject sdo)
-        {
-            sdo.Initialize();
-        }
-
-        [Obsolete]
-        public void ExecuteModule(LoadedModuleHandle module)
-        {
-            ExecuteModule(module.Module);
-        }
-
-        public void ExecuteModule(LoadedModule module)
-        {
-            var scriptContext = new Machine.Contexts.UserScriptContextInstance(module);
-            InitializeSDO(scriptContext);
-        }
-
-        public MachineInstance Machine
-        {
-            get { return _machine; }
-        }
-
-        public AttachedScriptsFactory AttachedScriptsFactory
-        {
-            get
-            {
-                return _attachedScriptsFactory;
-            }
-        }
-
-        public IDebugController DebugController
-        {
-            get
-            {
-                return _debugController;
-            }
-            set
-            {
-                _debugController = value;
-                ProduceExtraCode = CodeGenerationFlags.DebugCode;
-                _machine.SetDebugMode(_debugController);
-            }
-        }
-
-        public void SetCodeStatisticsCollector(ICodeStatCollector collector)
-        {
-            ProduceExtraCode = CodeGenerationFlags.CodeStatistics;
-            _machine.SetCodeStatisticsCollector(collector);
+            var collector = Services.TryResolve<ICodeStatCollector>();
+            if (collector == default)
+                return;
+            
+            ProduceExtraCode |= CodeGenerationFlags.CodeStatistics;
         }
 
         #region IDisposable Members
@@ -195,30 +194,9 @@ namespace ScriptEngine
 
         #endregion
 
-        public void CompileEnvironmentModules(RuntimeEnvironment env)
-        {
-            var scripts = env.GetUserAddedScripts().Where(x => x.Type == UserAddedScriptType.Module && env.GetGlobalProperty(x.Symbol) == null)
-                             .ToArray();
-
-            if (scripts.Length > 0)
-            {
-                var loadedObjects = new ScriptDrivenObject[scripts.Length];
-                for(var i = 0; i < scripts.Length; i++)
-                {
-                    var script = scripts[i];
-                    var loaded = LoadModuleImage(script.Image);
-
-                    var instance = CreateUninitializedSDO(loaded);
-                    env.SetGlobalProperty(script.Symbol, instance);
-                    loadedObjects[i] = instance;
-                }
-
-                foreach (var instance in loadedObjects)
-                {
-                    InitializeSDO(instance);
-                }
-            }
-        }
-        
+        /// <summary>
+        /// Инициализирует новый процесс
+        /// </summary>
+        public IBslProcess NewProcess() => Services.Resolve<IBslProcessFactory>().NewProcess();
     }
 }

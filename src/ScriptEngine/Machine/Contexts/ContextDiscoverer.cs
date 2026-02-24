@@ -6,17 +6,35 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using OneScript.Contexts;
+using OneScript.Contexts.Enums;
+using OneScript.DependencyInjection;
+using OneScript.Types;
+using OneScript.Values;
+using ScriptEngine.Types;
 
 namespace ScriptEngine.Machine.Contexts
 {
-    static class ContextDiscoverer
+    public class ContextDiscoverer
     {
         private const string INSTANCE_RETRIEVER_NAME = "CreateInstance";
+
+        public ContextDiscoverer(ITypeManager types, IGlobalsManager globals, IServiceContainer services)
+        {
+            Types = types;
+            Globals = globals;
+            Services = services;
+        }
         
-        public static void DiscoverClasses(System.Reflection.Assembly assembly)
+        private ITypeManager Types { get; }
+        private IGlobalsManager Globals { get; }
+        private IServiceContainer Services { get; }
+
+        public void DiscoverClasses(Assembly assembly, Predicate<Type> filter = null)
         {
             IEnumerable<Type> types;
             try
@@ -35,7 +53,12 @@ namespace ScriptEngine.Machine.Contexts
                 throw new Exception("Error loading assemblies:\n" + sb.ToString());
             }
 
-            var collection = GetMarkedTypes(types, typeof(ContextClassAttribute));
+            if (filter == null)
+            {
+                filter = t => true;
+            }
+            
+            var collection = GetMarkedTypes(types, typeof(ContextClassAttribute), filter);
 
             foreach (var type in collection)
             {
@@ -43,104 +66,125 @@ namespace ScriptEngine.Machine.Contexts
             }
         }
 
-        public static void DiscoverGlobalContexts(RuntimeEnvironment environment, System.Reflection.Assembly assembly)
+        public void DiscoverGlobalContexts(
+            IRuntimeEnvironment environment, 
+            Assembly assembly,
+            Predicate<Type> filter = null)
         {
+            if (filter == null)
+            {
+                filter = t => true;
+            }
+            
             var allTypes = assembly.GetTypes();
-            var enums = GetMarkedTypes(allTypes.AsParallel(), typeof(SystemEnumAttribute));
+            var enums = GetMarkedTypes(allTypes.AsParallel(), typeof(SystemEnumAttribute), filter);
             foreach (var item in enums)
             {
                 RegisterSystemEnum(item, environment);
             }
 
-            var simpleEnums = GetMarkedTypes(allTypes.AsParallel(), typeof(EnumerationTypeAttribute));
+            var simpleEnums = GetMarkedTypes(allTypes.AsParallel(), typeof(EnumerationTypeAttribute), filter);
             foreach (var item in simpleEnums)
             {
                 RegisterSimpleEnum(item, environment);
             }
 
-            var contexts = GetMarkedTypes(allTypes.AsParallel(), typeof(GlobalContextAttribute));
+            var contexts = GetMarkedTypes(allTypes.AsParallel(), typeof(GlobalContextAttribute), filter);
             foreach (var item in contexts)
             {
                 RegisterGlobalContext(item, environment);
             }
         }
 
-        private static IEnumerable<Type> GetMarkedTypes(IEnumerable<Type> allTypes, Type attribute)
+        private static IEnumerable<Type> GetMarkedTypes(IEnumerable<Type> allTypes, Type attribute, Predicate<Type> filter)
         {
-            return allTypes.Where(t => t.IsDefined(attribute, false));
+            return allTypes
+                .Where(t => t.IsDefined(attribute, false) && filter(t));
         }
 
-        private static void RegisterSystemType(Type stdClass)
+        private void RegisterSystemType(Type stdClass)
         {
-            var attribData = stdClass.GetCustomAttributes(typeof(ContextClassAttribute), false);
-            System.Diagnostics.Trace.Assert(attribData.Length > 0, "Class is not marked as context");
-
-            var attr = (ContextClassAttribute)attribData[0];
-            var newType = TypeManager.RegisterType(attr.GetName(), stdClass);
-            string alias = attr.GetAlias();
-            if(!String.IsNullOrEmpty(alias))
-                TypeManager.RegisterAliasFor(newType, alias);
+            Types.RegisterClass(stdClass);
         }
 
-        private static void RegisterSystemEnum(Type enumType, RuntimeEnvironment environment)
+        private void RegisterSystemEnum(Type enumType, IRuntimeEnvironment environment)
         {
             var method = enumType.GetMethod(INSTANCE_RETRIEVER_NAME, System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
             
-            System.Diagnostics.Trace.Assert(method != null, "System enum must have a static method " + INSTANCE_RETRIEVER_NAME);
+            if(method == default)
+                throw new ArgumentException($"System enum must have a static method {INSTANCE_RETRIEVER_NAME}");
+            
+            var parameters = method.GetParameters();
+            if(parameters.Length != 1 || parameters[0].ParameterType != typeof(ITypeManager))
+                throw new ArgumentException($"Method {enumType}::{INSTANCE_RETRIEVER_NAME} must accept ITypeManager as an argument");
 
-            var instance = (IValue)method.Invoke(null, null);
-            GlobalsManager.RegisterInstance(instance);
             var enumMetadata = (SystemEnumAttribute)enumType.GetCustomAttributes(typeof(SystemEnumAttribute), false)[0];
-            environment.InjectGlobalProperty(instance, enumMetadata.GetName(), true);
-            if(enumMetadata.GetAlias() != String.Empty)
-                environment.InjectGlobalProperty(instance, enumMetadata.GetAlias(), true);
+            var instance = (IValue)method.Invoke(null, new object[]{Types});
+            
+            RegisterEnumGlobalProperty(instance, environment, enumType, enumMetadata);
         }
-
-        private static void RegisterSimpleEnum(Type enumType, RuntimeEnvironment environment)
+        
+        private void RegisterSimpleEnum(Type enumType, IRuntimeEnvironment environment)
         {
             var enumTypeAttribute = (EnumerationTypeAttribute)enumType.GetCustomAttributes (typeof (EnumerationTypeAttribute), false)[0];
 
-            var type = TypeManager.RegisterType ("Перечисление" + enumTypeAttribute.Name, typeof (EnumerationContext));
-            if (enumTypeAttribute.Alias != null)
-                TypeManager.RegisterAliasFor (type, "Enum" + enumTypeAttribute.Alias);
+            var genericType = typeof(ClrEnumWrapper<>).MakeGenericType(enumType);
+            var genericValue = typeof(ClrEnumValueWrapper<>).MakeGenericType(enumType);
 
-            var enumValueType = TypeManager.RegisterType (enumTypeAttribute.Name, enumType);
+            var (enumTypeDescription, valueTypeDescription) =
+                EnumContextHelper.RegisterEnumType(genericType, genericValue, Types, enumTypeAttribute);
 
-            var instance = new EnumerationContext (type, enumValueType);
-
-            var wrapperTypeUndefined = typeof (CLREnumValueWrapper<>);
-            var wrapperType = wrapperTypeUndefined.MakeGenericType (new Type [] { enumType } );
-            var constructor = wrapperType.GetConstructor (new Type [] { typeof(EnumerationContext), enumType, typeof(DataType) });
-
-            foreach (var field in enumType.GetFields())
-            {
-                foreach (var contextFieldAttribute in field.GetCustomAttributes (typeof (EnumItemAttribute), false))
+            var factory = genericType.GetMethod(INSTANCE_RETRIEVER_NAME,
+                BindingFlags.Public | BindingFlags.Static,
+                default,
+                new []
                 {
-                    var contextField = (EnumItemAttribute)contextFieldAttribute;
-                    var osValue = (EnumerationValue)constructor.Invoke (new object [] { instance, field.GetValue (null), DataType.Enumeration } );
-
-                    if (contextField.Alias == null)
-                    {
-                        if(field.Name != contextField.Name)
-                            instance.AddValue(contextField.Name, field.Name, osValue);
-                        else
-                            instance.AddValue(contextField.Name, osValue);
-                    }
-                    else
-                        instance.AddValue(contextField.Name, contextField.Alias, osValue);
-                }
-            }
-
+                    typeof(TypeDescriptor),
+                    typeof(TypeDescriptor)
+                },
+                default);
+            
+            Debug.Assert(factory != null);
+            
+            var instance = (IValue)factory.Invoke(null, new object[]{enumTypeDescription, valueTypeDescription});
+            
 			if (enumTypeAttribute.CreateGlobalProperty)
-			{
-				environment.InjectGlobalProperty(instance, enumTypeAttribute.Name, true);
-				if (enumTypeAttribute.Alias != null)
-					environment.InjectGlobalProperty(instance, enumTypeAttribute.Alias, true);
-			}
+            {
+                RegisterEnumGlobalProperty(instance, environment, enumType, enumTypeAttribute);
+            }
         }
 
+        private void RegisterEnumGlobalProperty(
+            IValue instance,
+            IRuntimeEnvironment environment, 
+            Type enumType,
+            IEnumMetadataProvider enumTypeAttribute)
+        {
+            Globals.RegisterInstance(enumType, instance);
+            
+            var mainProperty = new SystemPropertyInfo.Builder(enumTypeAttribute.Name, enumTypeAttribute.Alias)
+                .SetPropertyType(enumType)
+                .Build();
+            
+            environment.InjectGlobalProperty(instance, mainProperty);
+                
+            // Deprecations
+            foreach (var deprecation in enumType.GetCustomAttributes<DeprecatedNameAttribute>())
+            {
+                if (deprecation.ThrowOnUse)
+                    throw new NotSupportedException(
+                        $"{nameof(deprecation.ThrowOnUse)} is not supported for enums yet. ({enumType})");
+                    
+                var deprecatedProperty = new SystemPropertyInfo.Builder(deprecation.Name)
+                    .SetPropertyType(enumType)
+                    .SetDeprecated(true)
+                    .Build();
+                
+                environment.InjectGlobalProperty(instance, deprecatedProperty);
+            }
+        }
 
-        private static void RegisterGlobalContext(Type contextType, RuntimeEnvironment environment)
+        private void RegisterGlobalContext(Type contextType, IRuntimeEnvironment environment)
         {
             var attribData = (GlobalContextAttribute)contextType.GetCustomAttributes(typeof(GlobalContextAttribute), false)[0];
             if (attribData.ManualRegistration)
@@ -148,11 +192,21 @@ namespace ScriptEngine.Machine.Contexts
 
             var method = contextType.GetMethod(INSTANCE_RETRIEVER_NAME, System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
             System.Diagnostics.Trace.Assert(method != null, "Global context must have a static method " + INSTANCE_RETRIEVER_NAME);
-            var instance = (IAttachableContext)method.Invoke(null, null);
-            GlobalsManager.RegisterInstance(instance);
-            environment.InjectObject(instance, false);
+            var parameters = method.GetParameters();
+            IAttachableContext instance;
+            if (parameters.Length == 0)
+            {
+                instance = (IAttachableContext)method.Invoke(null, null);
+            }
+            else
+            {
+                var resolvedArgs = parameters.Select(p => Services.Resolve(p.ParameterType))
+                    .ToArray();
+                instance = (IAttachableContext)method.Invoke(null, resolvedArgs);
+            }
+            Globals.RegisterInstance(instance);
+            environment.InjectObject(instance);
 
         }
-
     }
 }

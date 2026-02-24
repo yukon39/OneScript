@@ -6,12 +6,8 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
+using OneScript.StandardLibrary;
 using ScriptEngine.HostedScript;
-using ScriptEngine.HostedScript.Library;
 
 namespace oscript
 {
@@ -25,7 +21,7 @@ namespace oscript
 		{
 		}
 
-		public bool InputString(out string result, int maxLen)
+		public bool InputString(out string result, string prompt, int maxLen, bool multiline)
 		{
 			result = "";
 			return true;

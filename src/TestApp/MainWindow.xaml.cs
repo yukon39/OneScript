@@ -4,18 +4,23 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
+
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using OneScript.Commons;
+using OneScript.Sources;
+using OneScript.StandardLibrary;
+using OneScript.Web.Server;
 using ScriptEngine.HostedScript;
-using System.Collections.Generic;
 using ScriptEngine;
 using ScriptEngine.Compiler;
-using ScriptEngine.Environment;
-using ScriptEngine.HostedScript.Library;
+using ScriptEngine.HostedScript.Extensions;
+using ScriptEngine.Hosting;
 
 namespace TestApp
 {
@@ -43,6 +48,9 @@ namespace TestApp
         public MainWindow()
         {
             InitializeComponent();
+#if NETCOREAPP
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+#endif
         }
 
         // Определяем путь к AppData\Local
@@ -124,10 +132,35 @@ namespace TestApp
             }
         }
 
+        private HostedScriptEngine CreateEngine()
+        {
+            var builder = DefaultEngineBuilder
+                .Create()
+                .SetDefaultOptions()
+                .UseNativeRuntime()
+                .UseImports()
+                .SetupEnvironment(e =>
+                {
+                    e.AddStandardLibrary();
+                    e.AddWebServer();
+                })
+                .SetupConfiguration(x =>
+                {
+                    x.UseSystemConfigFile()
+                     .UseEntrypointConfigFile(_currentDocPath);
+                });
+
+            builder.UseFileSystemLibraries();
+            var engine = builder.Build();
+            var mainEngine = new HostedScriptEngine(engine);
+
+            return mainEngine;
+        }
+        
         private void Button_Click(object sender, RoutedEventArgs e)
         {
-            var hostedScript = new HostedScriptEngine();
-            hostedScript.CustomConfig = CustomConfigPath(_currentDocPath);
+            var hostedScript = CreateEngine();
+            
             hostedScript.Initialize();
             var src = hostedScript.Loader.FromString(txtCode.Text);
             using (var writer = new StringWriter())
@@ -135,12 +168,10 @@ namespace TestApp
                 try
                 {
                     var cs = hostedScript.GetCompilerService();
-                    if(GenerateExtraCode.IsChecked)
-                        cs.ProduceExtraCode |= CodeGenerationFlags.CodeStatistics;
-                    if(GenerateDebugCode.IsChecked)
-                        cs.ProduceExtraCode |= CodeGenerationFlags.DebugCode;
+                    cs.GenerateCodeStat = GenerateExtraCode.IsChecked;
+                    cs.GenerateDebugCode = GenerateDebugCode.IsChecked;
 
-                    var moduleWriter = new ScriptEngine.Compiler.ModuleWriter(cs);
+                    var moduleWriter = new ModuleDumpWriter(cs, hostedScript.Engine.NewProcess());
                     moduleWriter.Write(writer, src);
                     result.Text = writer.GetStringBuilder().ToString();
                 }
@@ -174,11 +205,12 @@ namespace TestApp
 
             var host = new Host(result, l_args.ToArray());
             SystemLogger.SetWriter(host);
-            var hostedScript = new HostedScriptEngine();
-            hostedScript.CustomConfig = CustomConfigPath(_currentDocPath);
-            SetEncodingFromConfig(hostedScript);
-
-            var src = new EditedFileSource(txtCode.Text, _currentDocPath);
+            var hostedScript = CreateEngine();
+            
+            var src = SourceCodeBuilder.Create()
+                .FromSource(new EditedFileSource(txtCode.Text, _currentDocPath))
+                .WithName(_currentDocPath)
+                .Build();
 
             Process process = null;
             try
@@ -200,21 +232,8 @@ namespace TestApp
                 result.AppendText("\nError detected. Exit code = " + returnCode.ToString());
             }
             result.AppendText("\nScript completed: " + DateTime.Now.ToString());
-            result.AppendText("\nDuration: " + sw.Elapsed.ToString());
+            result.AppendText("\nDuration: " + sw.Elapsed.ToString() + "\n");
             
-        }
-
-        public static string CustomConfigPath(string scriptPath)
-        {
-            if (scriptPath == null || !File.Exists(scriptPath))
-                return null;
-
-            var dir = Path.GetDirectoryName(scriptPath);
-            var cfgPath = Path.Combine(dir, HostedScriptEngine.ConfigFileName);
-            if (File.Exists(cfgPath))
-                return cfgPath;
-            else
-                return null;
         }
 
         private static string GetFileDialogFilter()
@@ -246,14 +265,11 @@ namespace TestApp
             dlg.Multiselect = false;
             if (dlg.ShowDialog() == true  )
             {
-                var hostedScript = new HostedScriptEngine();
-                hostedScript.CustomConfig = CustomConfigPath(dlg.FileName);
-                SetEncodingFromConfig(hostedScript);
-
+                _currentDocPath = dlg.FileName;
+                
                 using (var fs = FileOpener.OpenReader(dlg.FileName))
                 {
                     txtCode.Text = fs.ReadToEnd();
-                    _currentDocPath = dlg.FileName;
                     this.Title = _currentDocPath;
                 }
             }
@@ -262,17 +278,6 @@ namespace TestApp
         private void Save_Execute(object sender, ExecutedRoutedEventArgs e)
         {
             SaveFile();
-        }
-
-        private void SetEncodingFromConfig(HostedScriptEngine engine)
-        {
-            var cfg = engine.GetWorkingConfig();
-
-            string openerEncoding = cfg["encoding.script"];
-            if (!String.IsNullOrWhiteSpace(openerEncoding) && StringComparer.InvariantCultureIgnoreCase.Compare(openerEncoding, "default") != 0)
-            {
-                engine.Loader.ReaderEncoding = Encoding.GetEncoding(openerEncoding);
-            }
         }
 
         private bool SaveFile()
@@ -301,8 +306,8 @@ namespace TestApp
             dlg.DefaultExt = ".os";
             if (!String.IsNullOrEmpty(_currentDocPath))
             {
-                dlg.InitialDirectory = System.IO.Path.GetDirectoryName(_currentDocPath);
-                dlg.FileName = System.IO.Path.GetFileName(_currentDocPath);
+                dlg.InitialDirectory = Path.GetDirectoryName(_currentDocPath);
+                dlg.FileName = Path.GetFileName(_currentDocPath);
             }
 
             if (dlg.ShowDialog() == true )
@@ -417,8 +422,11 @@ namespace TestApp
 
         public void Echo(string str, MessageStatusEnum status = MessageStatusEnum.Ordinary)
         {
-            _output.AppendText(str + '\n');
-            _output.ScrollToEnd();
+            _output.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _output.AppendText(str + '\n');
+                _output.ScrollToEnd();
+            }));
         }
 
         public void ShowExceptionInfo(Exception exc)
@@ -426,7 +434,7 @@ namespace TestApp
             Echo(exc.Message);
         }
 
-        public bool InputString(out string result, int maxLen)
+        public bool InputString(out string result, string prompt, int maxLen, bool multiline)
         {
             result = "строка введена";
             return true;

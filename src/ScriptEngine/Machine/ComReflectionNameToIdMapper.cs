@@ -8,7 +8,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Text;
+using OneScript.Commons;
+using OneScript.Exceptions;
 
 namespace ScriptEngine.Machine
 {
@@ -17,7 +18,7 @@ namespace ScriptEngine.Machine
         private readonly Type _reflectedType;
         private readonly IndexedNamesCollection _propertyNames;
         private readonly IndexedNamesCollection _methodNames;
-        private readonly List<PropertyInfo> _propertyCache;
+        private List<PropertyInfo> _propertyCache;
         private readonly List<Func<IValue[], object>> _methodsCache;
 
         public ComReflectionNameToIdMapper(Type type)
@@ -25,26 +26,37 @@ namespace ScriptEngine.Machine
             _reflectedType = type;
             _propertyNames = new IndexedNamesCollection();
             _methodNames = new IndexedNamesCollection();
-            _propertyCache = new List<PropertyInfo>();
+            _propertyCache = null;
             _methodsCache = new List<Func<IValue[], object>>();
         }
 
+        public IReadOnlyList<PropertyInfo> GetProperties()
+        {
+            GetAllProperties();
+            return _propertyCache;
+        }
+        
+        private void GetAllProperties()
+        {
+            if(_propertyCache != null)
+                return;
+            
+            _propertyCache = new List<PropertyInfo>();
+            
+            var allProps = _reflectedType.GetProperties(BindingFlags.Instance | BindingFlags.Public);
+            foreach (var propInfo in allProps)
+            {
+                _propertyNames.RegisterName(propInfo.Name);
+                _propertyCache.Add(propInfo);
+            }
+        }
+        
         public int FindProperty(string name)
         {
-            int id;
-            var hasProperty = _propertyNames.TryGetIdOfName(name, out id);
-            if(!hasProperty)
-            {
-                var propInfo = _reflectedType.GetProperty(name, BindingFlags.IgnoreCase | BindingFlags.Instance | BindingFlags.Public);
-                if (propInfo == null)
-                    throw RuntimeException.PropNotFoundException(name);
-
-                id = _propertyNames.RegisterName(name);
-                System.Diagnostics.Debug.Assert(_propertyCache.Count == id);
-                
-                _propertyCache.Add(propInfo);
-                
-            }
+            GetAllProperties();
+            var hasProperty = _propertyNames.TryGetIdOfName(name, out var id);
+            if (!hasProperty)
+                throw PropertyAccessException.PropNotFoundException(name);
 
             return id;
         }

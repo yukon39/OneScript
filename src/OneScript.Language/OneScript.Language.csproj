@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
+  
+  <PropertyGroup>
+    <TargetFramework>$(TargetFrameworkVersion)</TargetFramework>
+    <Configurations>Debug;Release;LinuxDebug</Configurations>
+    <Platforms>AnyCPU</Platforms>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <AssemblyTitle>1C (BSL) language parser</AssemblyTitle>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>OneScript.Language</PackageId>
+    <Title>OneScript BSL Parse Tools</Title>
+    <PackageDescription>Parser components for 1Script and/or BSL</PackageDescription>
+    <PackageCopyright>OneScript OpenSource Community 2019</PackageCopyright>
+    <PackageTags>BSL 1C 1Script OneScript</PackageTags>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+    <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+    <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+  </PropertyGroup>
+
+</Project>

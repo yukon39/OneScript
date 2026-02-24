@@ -4,76 +4,67 @@ Mozilla Public License, v.2.0. If a copy of the MPL
 was not distributed with this file, You can obtain one 
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
-using System;
+
+using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Commons;
+using OneScript.Contexts;
+using OneScript.Execution;
+using OneScript.Types;
+using OneScript.Values;
 
 namespace ScriptEngine.Machine.Contexts
 {
-    public class EnumerationContext : PropertyNameIndexAccessor
+    public abstract class EnumerationContext : PropertyNameIndexAccessor, ICollectionContext<IValue>
     {
-        private readonly List<EnumerationValue> _values = new List<EnumerationValue>();
-
-        readonly IndexedNamesCollection _nameIds = new IndexedNamesCollection();
+        private readonly IndexedNameValueCollection<EnumerationValue> _values;
+        private readonly List<BslPropertyInfo> _definitions;
         private readonly TypeDescriptor _valuesType;
+        private readonly HashSet<int> _checkedDeprecatedProps = new HashSet<int>();
 
-        public EnumerationContext(TypeDescriptor typeRepresentation, TypeDescriptor valuesType) : base(typeRepresentation)
+        protected EnumerationContext(TypeDescriptor typeRepresentation, TypeDescriptor valuesType) : base(typeRepresentation)
         {
             _valuesType = valuesType;
+            _values = new IndexedNameValueCollection<EnumerationValue>();
+            _definitions = new List<BslPropertyInfo>();
         }
 
-        public void AddValue(string name, EnumerationValue val)
+        public void AddValue(EnumerationValue val)
         {
-            AddValue(name, null, val);
+            var index = _values.Add(val, val.Name, val.Alias);
+            
+            var propertyBuilder = BslPropertyBuilder.Create()
+                .SetNames(val.Name, val.Alias)
+                .CanRead(true)
+                .CanWrite(false)
+                .SetDispatchingIndex(index);
+                
+            if (_valuesType != null)
+                propertyBuilder.ReturnType(_valuesType.ImplementingClass);
+            
+            _definitions.Add(propertyBuilder.Build());
         }
 
-        public void AddValue(string name, string alias, EnumerationValue val)
+        protected void AddValue(EnumerationValue val, BslPropertyInfo definition)
         {
-            System.Diagnostics.Debug.Assert(name != null);
-            System.Diagnostics.Debug.Assert(val != null);
-
-            if (!ScriptEngine.Utils.IsValidIdentifier(name))
-                throw new ArgumentException("Name must be a valid identifier", "name");
-
-            if(alias != null && !ScriptEngine.Utils.IsValidIdentifier(alias))
-                throw new ArgumentException("Name must be a valid identifier", "alias");
-
-            _nameIds.RegisterName(name, alias);
-            val.ValuePresentation = name;
-            _values.Add(val);
-
+            _values.Add(val, definition.Name, definition.Alias);
+            _definitions.Add(definition);
         }
 
-        public TypeDescriptor ValuesType
+        public TypeDescriptor ValuesType => _valuesType;
+
+        public EnumerationValue this[string name] => GetPropValueInternal(GetPropertyNumber(name));
+
+        public override int GetPropCount()
         {
-            get
-            {
-                return _valuesType;
-            }
+            return _values.Count;
         }
 
-        public EnumerationValue this[string name]
+        public override int GetPropertyNumber(string name)
         {
-            get
-            {
-                int id = FindProperty(name);
-                return _values[id];
-            }
-        }
-
-        public int IndexOf(EnumerationValue enumVal)
-        {
-            return _values.IndexOf(enumVal);
-        }
-
-        public override int FindProperty(string name)
-        {
-            int id;
-            if (_nameIds.TryGetIdOfName(name, out id))
-                return id;
-            else
-                return base.FindProperty(name);
+            var id = _values.IndexOf(name); 
+            
+            return id == -1 ? base.GetPropertyNumber(name) : id;
         }
 
         public override bool IsPropReadable(int propNum)
@@ -83,15 +74,60 @@ namespace ScriptEngine.Machine.Contexts
 
         public override IValue GetPropValue(int propNum)
         {
+            return GetPropValueInternal(propNum);
+        }
+        
+        private EnumerationValue GetPropValueInternal(int propNum)
+        {
+            WarnDeprecation(propNum);
             return _values[propNum];
         }
-
-        protected IList<EnumerationValue> ValuesInternal
+        
+        private void WarnDeprecation(int propNum)
         {
-            get
+            if (_checkedDeprecatedProps.Contains(propNum)) 
+                return;
+            
+            if (GetPropertyInfo(propNum) is SystemPropertyInfo { IsDeprecated: true })
             {
-                return _values;
+                SystemLogger.Write($"Обращение к устаревшему свойству {GetPropertyInfo(propNum).Name}.");
+            }
+            
+            _checkedDeprecatedProps.Add(propNum);
+        }
+
+        public override string GetPropName(int propNum)
+        {
+            return _values.NameOf(propNum);
+        }
+        
+        public override BslPropertyInfo GetPropertyInfo(int propNum)
+        {
+            return _definitions[propNum];
+        }
+
+        protected IEnumerable<EnumerationValue> ValuesInternal => _values;
+
+        #region ICollectionContext Members
+
+        public int Count(IBslProcess process)
+        {
+            return _values.Count;
+        }
+
+        public IEnumerator<IValue> GetEnumerator()
+        {
+            foreach (var item in _values)
+            {
+                yield return item;
             }
         }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+        
+        #endregion
     }
 }

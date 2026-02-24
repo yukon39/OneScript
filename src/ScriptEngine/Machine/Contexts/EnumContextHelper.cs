@@ -5,57 +5,87 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using OneScript.Contexts.Enums;
+using OneScript.Types;
+using OneScript.Values;
 
 namespace ScriptEngine.Machine.Contexts
 {
     public static class EnumContextHelper
     {
-        public static void RegisterValues<T>(T instance) where T : EnumerationContext
+        public static (TypeDescriptor, TypeDescriptor) RegisterEnumType<TEnum, TValue>(ITypeManager typeManager) 
+            where TEnum : EnumerationContext 
+            where TValue : EnumerationValue
         {
-            var enumType = typeof(T);
-            var values = enumType.GetProperties()
-                .Where(x => x.GetCustomAttributes(typeof(EnumValueAttribute), false).Any())
-                .Select(x => (EnumValueAttribute)x.GetCustomAttributes(typeof(EnumValueAttribute), false)[0]);
-
-            foreach (var enumProperty in values)
-            {
-                instance.AddValue(enumProperty.GetName(), enumProperty.GetAlias(), new SelfAwareEnumValue<T>(instance));
-            }
+            return RegisterEnumType(typeof(TEnum), typeof(TValue), typeManager);
         }
-
-        public static void RegisterEnumType<T>(out TypeDescriptor enumType, out TypeDescriptor enumValueType) where T : EnumerationContext
+        
+        public static (TypeDescriptor, TypeDescriptor) RegisterEnumType(Type enumClass, Type enumValueClass, ITypeManager typeManager)
         {
-            var enumClassType = typeof(T);
-            var attribs = enumClassType.GetCustomAttributes(typeof(SystemEnumAttribute), false);
+            var attribs = enumClass.GetCustomAttributes(typeof(SystemEnumAttribute), false);
 
             if (attribs.Length == 0)
-                throw new InvalidOperationException("Enum is not marked as SystemEnum");
+                throw new InvalidOperationException($"Enum {enumClass} is not marked as SystemEnum");
 
             var enumMetadata = (SystemEnumAttribute)attribs[0];
 
-            enumType = TypeManager.RegisterType("Перечисление" + enumMetadata.GetName(), typeof(T));
-            enumValueType = TypeManager.RegisterType(enumMetadata.GetName(), typeof(SelfAwareEnumValue<T>));
+            return RegisterEnumType(enumClass, enumValueClass, typeManager, enumMetadata);
         }
 
-        public static T CreateEnumInstance<T>(EnumCreationDelegate<T> creator) where T : EnumerationContext
+        public static (TypeDescriptor, TypeDescriptor) RegisterEnumType(
+            Type enumClass,
+            Type enumValueClass,
+            ITypeManager typeManager,
+            IEnumMetadataProvider enumMetadata)
         {
-            T instance;
+            var enumType = CreateEnumType(enumClass, enumMetadata);
+            typeManager.RegisterType(enumType);
 
-            TypeDescriptor enumType;
-            TypeDescriptor enumValType;
-
-            EnumContextHelper.RegisterEnumType<T>(out enumType, out enumValType);
-
-            instance = creator(enumType, enumValType);
-
-            EnumContextHelper.RegisterValues<T>(instance);
-
-            return instance;
+            var enumValueType = CreateEnumValueType(enumValueClass, enumMetadata);
+            typeManager.RegisterType(enumValueType);
+            
+            return (enumType, enumValueType);
         }
 
+        private static TypeDescriptor CreateEnumType(Type enumType, IEnumMetadataProvider metadata)
+        {
+            return new TypeDescriptor(
+                metadata.TypeUUID ?? Guid.NewGuid().ToString(),
+                "Перечисление" + metadata.Name,
+                metadata.Alias != default ? "Enum" + metadata.Alias : default,
+                enumType
+            );
+        }
+
+        private static TypeDescriptor CreateEnumValueType(Type enumValueClass, IEnumMetadataProvider metadata)
+        {
+            return new TypeDescriptor(
+                metadata.ValueTypeUUID ?? Guid.NewGuid().ToString(),
+                metadata.Name,
+                metadata.Alias,
+                enumValueClass
+            );
+        }
+
+        public static TOwner CreateClrEnumInstance<TOwner, TEnum>(ITypeManager typeManager, EnumCreationDelegate<TOwner> creator) 
+            where TOwner : EnumerationContext
+            where TEnum : struct
+        {
+            var (enumType, enumValType) = RegisterEnumType<TOwner, ClrEnumValueWrapper<TEnum>>(typeManager);
+            return creator(enumType, enumValType);
+        }
+        
+        public static ClrEnumValueWrapper<T> WrapClrValue<T>(
+            this EnumerationContext owner,
+            string name,
+            string alias,
+            T value)
+            where T : struct
+        {
+            var wrappedValue = new ClrEnumValueWrapper<T>(owner.ValuesType, value, name, alias); 
+            owner.AddValue(wrappedValue);
+            return wrappedValue;
+        }
     }
 
     public delegate T EnumCreationDelegate<T>(TypeDescriptor typeRepresentation, TypeDescriptor valuesType) where T : EnumerationContext;

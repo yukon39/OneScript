@@ -5,27 +5,41 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 //#if !__MonoCS__
+
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
-using System.Text;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Values;
 
 namespace ScriptEngine.Machine.Contexts
 {
-    class ManagedCOMWrapperContext : COMWrapperContext
+    public class ManagedCOMWrapperContext : COMWrapperContext
     {
         private readonly Type _instanceType;
-        private readonly object _instance;
         private bool? _isIndexed;
 
         private readonly ComReflectionNameToIdMapper _nameMapper;
 
-        public ManagedCOMWrapperContext(object instance)
+        public ManagedCOMWrapperContext(object instance) : base(instance)
         {
             _instanceType = instance.GetType();
-            _instance = instance;
             _nameMapper = new ComReflectionNameToIdMapper(_instanceType);
+        }
+
+        public override int GetPropCount()
+        {
+            return _nameMapper.GetProperties().Count;
+        }
+
+        public override string GetPropName(int propNum)
+        {
+            var prop = _nameMapper.GetProperty(propNum);
+            return prop.Name;
         }
 
         public override bool IsIndexed
@@ -35,9 +49,9 @@ namespace ScriptEngine.Machine.Contexts
                 if (_isIndexed == null)
                 {
                     _isIndexed = _instanceType.GetProperties().Any(x => x.GetIndexParameters().Length > 0);
-                }     
-                
-                return (bool)_isIndexed;
+                }
+
+                return (bool) _isIndexed;
             }
         }
 
@@ -47,12 +61,11 @@ namespace ScriptEngine.Machine.Contexts
 
             try
             {
-
-                comEnumerator = (System.Collections.IEnumerator)_instanceType.InvokeMember("GetEnumerator",
-                                        BindingFlags.InvokeMethod,
-                                        null,
-                                        _instance,
-                                        new object[0]);
+                comEnumerator = (System.Collections.IEnumerator) _instanceType.InvokeMember("GetEnumerator",
+                    BindingFlags.InvokeMethod,
+                    null,
+                    Instance,
+                    new object[0]);
             }
             catch (MissingMethodException)
             {
@@ -65,12 +78,7 @@ namespace ScriptEngine.Machine.Contexts
             }
         }
 
-        public override object UnderlyingObject
-        {
-            get { return _instance; }
-        }
-
-        public override int FindProperty(string name)
+        public override int GetPropertyNumber(string name)
         {
             return _nameMapper.FindProperty(name);
         }
@@ -90,16 +98,16 @@ namespace ScriptEngine.Machine.Contexts
         public override IValue GetPropValue(int propNum)
         {
             var pi = _nameMapper.GetProperty(propNum);
-            var result = pi.GetGetMethod().Invoke(_instance, null);
+            var result = pi.GetGetMethod().Invoke(Instance, null);
             return CreateIValue(result);
         }
 
         public override void SetPropValue(int propNum, IValue newVal)
         {
             var pi = _nameMapper.GetProperty(propNum);
-            
+
             var setMethod = pi.GetSetMethod();
-            setMethod.Invoke(_instance, MarshalArgumentsStrict(new[] { newVal }, new[] { pi.PropertyType }));
+            setMethod.Invoke(Instance, MarshalArgumentsStrict(new[] {newVal}, new[] {pi.PropertyType}));
         }
 
         public override IValue GetIndexedValue(IValue index)
@@ -107,91 +115,105 @@ namespace ScriptEngine.Machine.Contexts
             if (!IsIndexed)
                 throw RuntimeException.IndexedAccessIsNotSupportedException();
 
-            var member = _instanceType.GetMethod("get_Item", BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance);
+            var member = _instanceType.GetMethod("get_Item",
+                BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance);
 
             if (member == null) // set only?
                 throw RuntimeException.IndexedAccessIsNotSupportedException();
 
-            object retValue = member.Invoke(_instance, MarshalArgumentsStrict(new[] { index }, GetMethodParametersTypes(member)));
+            object retValue = member.Invoke(Instance,
+                MarshalArgumentsStrict(new[] {index}, GetMethodParametersTypes(member)));
 
             return CreateIValue(retValue);
-
         }
-        
+
         public override void SetIndexedValue(IValue index, IValue value)
         {
             if (!IsIndexed)
                 throw RuntimeException.IndexedAccessIsNotSupportedException();
 
-            var member = _instanceType.GetMethod("set_Item", BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance);
+            var member = _instanceType.GetMethod("set_Item",
+                BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance);
 
             if (member == null) // get only?
                 throw RuntimeException.IndexedAccessIsNotSupportedException();
 
-            object retValue = member.Invoke(_instance, MarshalArgumentsStrict(new[] { index, value }, GetMethodParametersTypes(member)));
-
+            member.Invoke(Instance, MarshalArgumentsStrict(new[] {index, value}, GetMethodParametersTypes(member)));
         }
 
-        public override int FindMethod(string name)
+        public override int GetMethodNumber(string name)
         {
-            return _nameMapper.FindMethod(_instance, name);
+            return _nameMapper.FindMethod(Instance, name);
         }
 
-        public override MethodInfo GetMethodInfo(int methodNumber)
+        public override BslMethodInfo GetMethodInfo(int methodNumber)
         {
-            var methodInfo = _nameMapper.GetMethod(methodNumber);
-            return GetReflectableMethod(methodInfo.Method);
+            var methodInfo = _nameMapper.GetMethod(methodNumber).Method;
+            return GetReflectableMethod(methodInfo);
         }
 
-        public override void CallAsProcedure(int methodNumber, IValue[] arguments)
+        public override BslPropertyInfo GetPropertyInfo(int propertyNumber)
+        {
+            var info = _nameMapper.GetProperty(propertyNumber);
+            return GetReflectableProperty(propertyNumber, info);
+        }
+
+        public override void CallAsProcedure(int methodNumber, IValue[] arguments, IBslProcess process)
         {
             var method = _nameMapper.GetMethod(methodNumber);
             method.Invoke(arguments);
         }
 
-        public override void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue)
+        public override void CallAsFunction(int methodNumber, IValue[] arguments, out IValue retValue, IBslProcess process)
         {
             var method = _nameMapper.GetMethod(methodNumber);
             var result = method.Invoke(arguments);
             retValue = CreateIValue(result);
         }
 
-        private MethodInfo GetReflectableMethod(System.Reflection.MethodInfo reflectionMethod)
+        private BslPropertyInfo GetReflectableProperty(int index, PropertyInfo p)
         {
-            MethodInfo methodInfo;
-
-            methodInfo = new MethodInfo();
-            methodInfo.Name = reflectionMethod.Name;
-
-            var reflectedMethod = reflectionMethod as System.Reflection.MethodInfo;
-
-            if (reflectedMethod != null)
-            {
-                methodInfo.IsFunction = reflectedMethod.ReturnType != typeof(void);
-                var reflectionParams = reflectedMethod.GetParameters();
-                FillMethodInfoParameters(ref methodInfo, reflectionParams);
-            }
-
-            return methodInfo;
+            return BslPropertyBuilder.Create()
+                .Name(p.Name)
+                .SetDispatchingIndex(index)
+                .CanRead(p.CanRead)
+                .CanWrite(p.CanWrite)
+                .Build();
         }
-        
-        private static Type[] GetMethodParametersTypes(System.Reflection.MethodInfo method)
+
+        private BslMethodInfo GetReflectableMethod(MethodInfo reflectionMethod)
+        {
+            var builder = BslMethodBuilder.Create();
+            builder.Name(reflectionMethod.Name);
+            builder.ReturnType(reflectionMethod.ReturnType);
+
+            var reflectionParams = reflectionMethod.GetParameters();
+            FillMethodInfoParameters(builder, reflectionParams);
+
+            return builder.Build();
+        }
+
+        private static Type[] GetMethodParametersTypes(MethodInfo method)
         {
             return method.GetParameters()
                 .Select(x => x.ParameterType)
                 .ToArray();
         }
 
-        private static void FillMethodInfoParameters(ref MethodInfo methodInfo, System.Reflection.ParameterInfo[] reflectionParams)
+        private static void FillMethodInfoParameters(BslMethodBuilder<BslScriptMethodInfo> methodSignature,
+            ParameterInfo[] reflectionParams)
         {
-            methodInfo.Params = new ParameterDefinition[reflectionParams.Length];
-            for (int i = 0; i < reflectionParams.Length; i++)
+            foreach (var reflectedParam in reflectionParams)
             {
-                var reflectedParam = reflectionParams[i];
-                var param = new ParameterDefinition();
-                param.HasDefaultValue = reflectedParam.IsOptional;
-                param.IsByValue = !reflectedParam.IsOut;
-                methodInfo.Params[i] = param;
+                var paramBuilder = methodSignature.NewParameter()
+                    .ByValue(!reflectedParam.IsOut);
+
+                if (!reflectedParam.HasDefaultValue)
+                    continue;
+
+                var marshalled = ContextValuesMarshaller.ConvertReturnValue(reflectedParam.DefaultValue);
+                Debug.Assert(marshalled is BslPrimitiveValue);
+                paramBuilder.DefaultValue((BslPrimitiveValue) marshalled);
             }
         }
     }

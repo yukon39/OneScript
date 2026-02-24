@@ -5,9 +5,10 @@ was not distributed with this file, You can obtain one
 at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
-using System;
 using System.Collections.Generic;
 using System.Linq;
+using OneScript.Contexts;
+using OneScript.Exceptions;
 
 namespace ScriptEngine.Machine.Contexts
 {
@@ -16,7 +17,7 @@ namespace ScriptEngine.Machine.Contexts
     /// Содержит объекты типа КадрСтекаВызовов
     /// </summary>
     [ContextClass("КоллекцияКадровСтекаВызовов", "CallStackFramesCollection")]
-    public class StackTraceCollectionContext : AutoContext<StackTraceCollectionContext>, ICollectionContext
+    public class StackTraceCollectionContext : AutoCollectionContext<StackTraceCollectionContext, StackTraceItemContext>
     {
         private List<StackTraceItemContext> _frames;
 
@@ -30,14 +31,31 @@ namespace ScriptEngine.Machine.Contexts
             }).ToList();
         }
 
-        public int Count()
+        /// <summary>
+        /// Возвращает количество кадров в стеке вызовов
+        /// </summary>
+        /// <returns>Число - Количество кадров в стеке вызовов</returns>
+        [ContextMethod("Количество", "Count")]
+        public override int Count()
         {
             return _frames.Count;
         }
 
-        public CollectionEnumerator GetManagedIterator()
+        public override IEnumerator<StackTraceItemContext> GetEnumerator()
         {
-            return new CollectionEnumerator(_frames.GetEnumerator());
+            return _frames.GetEnumerator();
+        }
+
+        public override bool IsIndexed => true;
+
+        public override IValue GetIndexedValue(IValue index)
+        {
+            var idx = (int)index.AsNumber();
+
+            if (idx < 0 || idx >= Count())
+                throw RuntimeException.IndexOutOfRange();
+
+            return _frames[idx];
         }
     }
 }

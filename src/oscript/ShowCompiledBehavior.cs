@@ -6,13 +6,8 @@ at http://mozilla.org/MPL/2.0/.
 ----------------------------------------------------------*/
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
-using ScriptEngine;
+using OneScript.Language;
 using ScriptEngine.Compiler;
-using ScriptEngine.HostedScript;
 
 namespace oscript
 {
@@ -27,16 +22,14 @@ namespace oscript
 
 		public override int Execute()
 		{
-			var hostedScript = new HostedScriptEngine
-			{
-				CustomConfig = ScriptFileHelper.CustomConfigPath(_path)
-			};
+			var builder = ConsoleHostBuilder.Create(_path);
+			var hostedScript = ConsoleHostBuilder.Build(builder);
 			hostedScript.Initialize();
-			ScriptFileHelper.OnBeforeScriptRead(hostedScript);
+			
 			var source = hostedScript.Loader.FromFile(_path);
 			var compiler = hostedScript.GetCompilerService();
 			hostedScript.SetGlobalEnvironment(new DoNothingHost(), source);
-			var writer = new ModuleWriter(compiler);
+			var writer = new ModuleDumpWriter(compiler, hostedScript.Engine.NewProcess());
 			try
 			{
 				writer.Write(Console.Out, source);
@@ -48,6 +41,12 @@ namespace oscript
 			}
 
 			return 0;
+		}
+
+		public static AppBehavior Create(CmdLineHelper helper)
+		{
+			var path = helper.Next();
+			return path != null ? new ShowCompiledBehavior(path) : null;
 		}
 	}
 }

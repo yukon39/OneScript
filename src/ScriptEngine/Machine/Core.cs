@@ -14,6 +14,10 @@ namespace ScriptEngine.Machine
         Nop,
         PushVar,
         PushConst,
+        PushInt,
+        PushBool,
+        PushUndef,
+        PushNull,
         PushLoc,
         PushRef,
         LoadVar,
@@ -48,6 +52,7 @@ namespace ScriptEngine.Machine
         JmpCounter,
         Inc,
         NewInstance,
+        NewFunc,
         PushIterator,
         IteratorNext,
         StopIterator,
@@ -60,6 +65,9 @@ namespace ScriptEngine.Machine
         PushTmp,
         PopTmp,
         Execute,
+        AddHandler,
+        RemoveHandler,
+        ExitTry,
 
         // built-in functions
         Eval,
@@ -93,12 +101,14 @@ namespace ScriptEngine.Machine
         Hour,
         Minute,
         Second,
+        BegOfWeek,
         BegOfYear,
         BegOfMonth,
         BegOfDay,
         BegOfHour,
         BegOfMinute,
         BegOfQuarter,
+        EndOfWeek,
         EndOfYear,
         EndOfMonth,
         EndOfDay,
@@ -151,11 +161,7 @@ namespace ScriptEngine.Machine
         Number,
         Date,
         Boolean,
-        Type,
-        Object,
-        NotAValidValue, // default argument value
-        Enumeration,
-        GenericValue
+        Null
     }
 
     [Serializable]
@@ -174,153 +180,5 @@ namespace ScriptEngine.Machine
             return Type == other.Type && string.Equals(Presentation, other.Presentation, StringComparison.Ordinal);
         }
         
-    }
-
-    [Serializable]
-    public struct MethodInfo
-    {
-        public string Name;
-        public string Alias;
-        public bool IsFunction;
-        public bool IsExport;
-        [NonSerialized]
-        public bool IsDeprecated;
-        [NonSerialized]
-        public bool ThrowOnUseDeprecated;
-        public ParameterDefinition[] Params;
-        public AnnotationDefinition[] Annotations;
-
-        public int ArgCount
-        {
-            get
-            {
-                return Params != null ? Params.Length : 0;
-            }
-        }
-
-        public int AnnotationsCount => Annotations?.Length ?? 0;
-
-    }
-
-    [Serializable]
-    public struct ParameterDefinition
-    {
-        public string Name;
-        public bool IsByValue;
-        public bool HasDefaultValue;
-        public int DefaultValueIndex;
-        public AnnotationDefinition[] Annotations;
-
-        public int AnnotationsCount => Annotations?.Length ?? 0;
-
-        public const int UNDEFINED_VALUE_INDEX = -1;
-
-        public bool IsDefaultValueDefined()
-        {
-            return HasDefaultValue && DefaultValueIndex != UNDEFINED_VALUE_INDEX;
-        }
-    }
-
-    [Serializable]
-    public struct AnnotationDefinition
-    {
-        public string Name;
-        public AnnotationParameter[] Parameters;
-
-        public int ParamCount => Parameters?.Length ?? 0;
-    }
-
-    [Serializable]
-    public struct AnnotationParameter
-    {
-        public string Name;
-        public int ValueIndex;
-
-        [NonSerialized]
-        public IValue RuntimeValue;
-        
-        public const int UNDEFINED_VALUE_INDEX = -1;
-
-        public override string ToString()
-        {
-            if (string.IsNullOrEmpty(Name))
-            {
-                return string.Format("[{0}]", ValueIndex);
-            }
-            if (ValueIndex == UNDEFINED_VALUE_INDEX)
-            {
-                return Name;
-            }
-            return String.Format("{0}=[{1}]", Name, ValueIndex);
-        }
-    }
-
-    public struct TypeDescriptor : IEquatable<TypeDescriptor>
-    {
-        public int ID;
-        public string Name;
-
-        public override string ToString()
-        {
-            return Name;
-        }
-
-        public static TypeDescriptor FromDataType(DataType srcType)
-        {
-            System.Diagnostics.Debug.Assert(
-                   srcType == DataType.Boolean
-                || srcType == DataType.Date
-                || srcType == DataType.Number
-                || srcType == DataType.String
-                || srcType == DataType.Undefined
-                || srcType == DataType.Type);
-
-            return TypeManager.GetTypeById((int)srcType);
-        }
-
-        public bool Equals(TypeDescriptor other)
-        {
-            return other.ID == this.ID;
-        }
-    }
-
-    [Serializable]
-    public struct SymbolBinding
-    {
-        public int CodeIndex;
-        public int ContextIndex;
-    }
-
-    public enum SymbolType
-    {
-        Variable,
-        ContextProperty
-    }
-
-    [Serializable]
-    public struct VariableInfo
-    {
-        public int Index;
-        public string Identifier;
-        public string Alias;
-        public SymbolType Type;
-        
-        public bool CanGet;
-        public bool CanSet;
-        
-        public AnnotationDefinition[] Annotations;
-
-        public int AnnotationsCount => Annotations?.Length ?? 0;
-
-        public override string ToString()
-        {
-            return $"{Index}:{Identifier}";
-        }
-    }
-
-    struct VariableBinding
-    {
-        public SymbolType type;
-        public SymbolBinding binding;
     }
 }

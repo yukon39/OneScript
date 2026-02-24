@@ -7,25 +7,35 @@ at http://mozilla.org/MPL/2.0/.
 using System;
 using System.Collections.Generic;
 using System.Text;
-using ScriptEngine.Environment;
+using OneScript.Sources;
 using System.Security.Cryptography;
+using OneScript.Commons;
+using OneScript.Compilation;
+using OneScript.Compilation.Binding;
+using OneScript.Contexts;
+using OneScript.Exceptions;
+using OneScript.Execution;
+using OneScript.Types;
+using ScriptEngine.Machine.Interfaces;
 
 namespace ScriptEngine.Machine.Contexts
 {
     public class AttachedScriptsFactory
     {
-        private readonly Dictionary<string, LoadedModule> _loadedModules;
+        private readonly Dictionary<string, IExecutableModule> _loadedModules;
         private readonly Dictionary<string, string> _fileHashes;
         
         private readonly ScriptingEngine _engine;
 
         internal AttachedScriptsFactory(ScriptingEngine engine)
         {
-            _loadedModules = new Dictionary<string, LoadedModule>(StringComparer.InvariantCultureIgnoreCase);
+            _loadedModules = new Dictionary<string, IExecutableModule>(StringComparer.InvariantCultureIgnoreCase);
             _fileHashes = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
             _engine = engine;
         }
 
+        private ITypeManager TypeManager => _engine.TypeManager;
+        
         static string GetMd5Hash(MD5 md5Hash, string input)
         {
 
@@ -47,7 +57,7 @@ namespace ScriptEngine.Machine.Contexts
             return sBuilder.ToString();
         }
 
-        public void AttachByPath(CompilerService compiler, string path, string typeName)
+        public void AttachByPath(ICompilerFrontend compiler, string path, string typeName, IBslProcess process)
         {
             if (!Utils.IsValidIdentifier(typeName))
                 throw RuntimeException.InvalidArgumentValue();
@@ -56,43 +66,45 @@ namespace ScriptEngine.Machine.Contexts
             
             ThrowIfTypeExist(typeName, code);
 
-            LoadAndRegister(typeof(AttachedScriptsFactory), compiler, typeName, code);
+            CompileAndRegister(typeof(AttachedScriptsFactory), compiler, typeName, code, process);
 
         }
 
-        public void AttachFromString(CompilerService compiler, string text, string typeName)
+        public void AttachFromString(ICompilerFrontend compiler, string text, string typeName, IBslProcess process)
         {
             var code = _engine.Loader.FromString(text);
             ThrowIfTypeExist(typeName, code);
             
-            LoadAndRegister(typeof(AttachedScriptsFactory), compiler, typeName, code);
+            CompileAndRegister(typeof(AttachedScriptsFactory), compiler, typeName, code, process);
         }
 
-        public IRuntimeContextInstance LoadFromPath(CompilerService compiler, string path)
+        public UserScriptContextInstance LoadFromPath(ICompilerFrontend compiler, string path, IBslProcess process)
         {
-            return LoadFromPath(compiler, path, null);
+            return LoadFromPath(compiler, path, null, process);
         }
 
-        public IRuntimeContextInstance LoadFromPath(CompilerService compiler, string path, ExternalContextData externalContext)
+        public UserScriptContextInstance LoadFromPath(ICompilerFrontend compiler, string path,
+            ExternalContextData externalContext, IBslProcess process)
         {
             var code = _engine.Loader.FromFile(path);
-            return LoadAndCreate(compiler, code, externalContext);
+            return LoadAndCreate(compiler, code, externalContext, process);
         }
 
-        public IRuntimeContextInstance LoadFromString(CompilerService compiler, string text, ExternalContextData externalContext = null)
+        public UserScriptContextInstance LoadFromString(ICompilerFrontend compiler, string text, IBslProcess process,
+            ExternalContextData externalContext = null)
         {
             var code = _engine.Loader.FromString(text);
-            return LoadAndCreate(compiler, code, externalContext);
+            return LoadAndCreate(compiler, code, externalContext, process);
         }
 
 
-        private void ThrowIfTypeExist(string typeName, ICodeSource code)
+        private void ThrowIfTypeExist(string typeName, SourceCode code)
         {
             if (TypeManager.IsKnownType(typeName) && _loadedModules.ContainsKey(typeName))
             {
                 using (MD5 md5Hash = MD5.Create())
                 {
-                    string moduleCode = code.Code;
+                    string moduleCode = code.GetSourceCode();
                     string hash = GetMd5Hash(md5Hash, moduleCode);
                     string storedHash = _fileHashes[typeName];
 
@@ -105,81 +117,61 @@ namespace ScriptEngine.Machine.Contexts
 
         }
 
-        private void LoadAndRegister(Type type, CompilerService compiler, string typeName, Environment.ICodeSource code)
+        private void CompileAndRegister(Type type, ICompilerFrontend compiler, string typeName, SourceCode code, IBslProcess process)
         {
             if(_loadedModules.ContainsKey(typeName))
             {
                 return;
             }
 
-            var module = CompileModuleFromSource(compiler, code, null);
-            var loaded = new LoadedModule(module);
-
-            _loadedModules.Add(typeName, loaded);
+            var module = CompileModuleFromSource(compiler, code, null, process);
+            _loadedModules.Add(typeName, module);
             using(var md5Hash = MD5.Create())
             {
-                var hash = GetMd5Hash(md5Hash, code.Code);
+                var hash = GetMd5Hash(md5Hash, code.GetSourceCode());
                 _fileHashes.Add(typeName, hash);
             }
 
-            TypeManager.RegisterType(typeName, type);
+            TypeManager.RegisterType(typeName, default, type);
 
         }
 
-        [Obsolete]
-        public void LoadAndRegister(string typeName, ScriptModuleHandle moduleHandle)
-        {
-            LoadAndRegister(typeName, moduleHandle.Module);
-        }
-
-        public void LoadAndRegister(string typeName, ModuleImage moduleImage)
+        public void RegisterTypeModule(string typeName, IExecutableModule module)
         {
             if (_loadedModules.ContainsKey(typeName))
             {
-                var alreadyLoadedSrc = _loadedModules[typeName].ModuleInfo.Origin;
-                var currentSrc = moduleImage.ModuleInfo.Origin;
+                var alreadyLoadedSrc = (_loadedModules[typeName]).Source.Location;
+                var currentSrc = module.Source.Location;
 
                 if(alreadyLoadedSrc != currentSrc)
                     throw new RuntimeException("Type «" + typeName + "» already registered");
 
                 return;
             }
-
-            var loadedModule = new LoadedModule(moduleImage);
-            _loadedModules.Add(typeName, loadedModule);
             
-            TypeManager.RegisterType(typeName, typeof(AttachedScriptsFactory));
-
+            _loadedModules.Add(typeName, module);
+            _engine.TypeManager.RegisterType(typeName, default, typeof(AttachedScriptsFactory));
+        }
+        
+        private UserScriptContextInstance LoadAndCreate(ICompilerFrontend compiler, SourceCode code,
+            ExternalContextData externalContext, IBslProcess process)
+        {
+            var module = CompileModuleFromSource(compiler, code, externalContext, process);
+            return _engine.NewObject(module, process, externalContext);
         }
 
-        private IRuntimeContextInstance LoadAndCreate(CompilerService compiler, Environment.ICodeSource code, ExternalContextData externalContext)
+        public IExecutableModule CompileModuleFromSource(ICompilerFrontend compiler, SourceCode code, ExternalContextData externalContext, IBslProcess process)
         {
-            var module = CompileModuleFromSource(compiler, code, externalContext);
-            var loadedHandle = new LoadedModule(module);
-            return _engine.NewObject(loadedHandle, externalContext);
-        }
-
-        [Obsolete]
-        public ScriptModuleHandle CreateModuleFromSource(CompilerService compiler, Environment.ICodeSource code, ExternalContextData externalContext)
-        {
-            return new ScriptModuleHandle()
-            {
-                Module = CompileModuleFromSource(compiler, code, externalContext)
-            };
-        }
-
-        public ModuleImage CompileModuleFromSource(CompilerService compiler, Environment.ICodeSource code, ExternalContextData externalContext)
-        {
-            compiler.DefineVariable("ЭтотОбъект", "ThisObject", SymbolType.ContextProperty);
+            var scope = compiler.FillSymbols(typeof(UserScriptContextInstance));
             if (externalContext != null)
             {
                 foreach (var item in externalContext)
                 {
-                    compiler.DefineVariable(item.Key, null, SymbolType.ContextProperty);
+                    scope.Variables.Add(new LocalVariableSymbol(item.Key, item.Value.GetType()));
                 }
             }
 
-            return compiler.Compile(code);
+            return compiler.Compile(code, process);
         }
         
         private static AttachedScriptsFactory _instance;
@@ -193,20 +185,29 @@ namespace ScriptEngine.Machine.Contexts
             _instance = factory;
         }
 
-        public static LoadedModule GetModuleOfType(string typeName)
+        public static IExecutableModule GetModuleOfType(string typeName)
         {
             return _instance._loadedModules[typeName];
         }
 
-        [ScriptConstructor(ParametrizeWithClassName = true)]
-        public static UserScriptContextInstance ScriptFactory(string typeName, IValue[] arguments)
+        [ScriptConstructor]
+        public static UserScriptContextInstance ScriptFactory(TypeActivationContext context, IValue[] arguments)
         {
-            var module = _instance._loadedModules[typeName];
+            var module = _instance._loadedModules[context.TypeName];
 
-            var newObj = new UserScriptContextInstance(module, typeName, arguments);
-            newObj.AddProperty("ЭтотОбъект", "ThisObject", newObj);
+            var type = context.TypeManager.GetTypeByName(context.TypeName);
+            UserScriptContextInstance newObj;
+            if (module.GetInterface<IterableBslInterface>() != null)
+            {
+                newObj = new UserIterableContextInstance(module, type, arguments);
+            }
+            else
+            {
+                newObj = new UserScriptContextInstance(module, type, arguments);
+            }
+
             newObj.InitOwnData();
-            newObj.Initialize();
+            newObj.Initialize(context.CurrentProcess);
 
             return newObj;
         }

@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+    <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
+    
+    <PropertyGroup>
+        <TargetFramework>$(TargetFrameworkVersion)</TargetFramework>
+        <Configurations>Debug;Release;LinuxDebug</Configurations>
+        <Platforms>AnyCPU</Platforms>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <PackageId>OneScript.StandardLibrary</PackageId>
+        <Title>OneScript Main Client Libraries</Title>
+        <PackageAuthors>OneScript OpenSource Community</PackageAuthors>
+        <PackageOwners>EvilBeaver &lt;ovsiankin.aa@gmail.com&gt;</PackageOwners>
+        <PackageProjectUrl>http://oscript.io</PackageProjectUrl>
+        <PackageDescription>Classes for 1Script processes hosting</PackageDescription>
+        <PackageCopyright>OneScript OpenSource Community 2015</PackageCopyright>
+        <PackageTags>BSL 1C 1Script OneScript</PackageTags>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+      <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+      <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.2" />
+        <PackageReference Include="ProDotNetZip" Version="1.20.0" />
+    </ItemGroup>
+    
+    <ItemGroup>
+      <ProjectReference Include="..\ScriptEngine\ScriptEngine.csproj" />
+    </ItemGroup>
+    
+</Project>

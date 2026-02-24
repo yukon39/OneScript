@@ -1,57 +1,43 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
-  <!--Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" /-->
+  <Import Project="$(MSBuildProjectDirectory)/../oscommon.targets" />
   
   <PropertyGroup>
-    <TargetFramework>net452</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <!--LanguageTargets>$(MSBuildExtensionsPath)\$(VisualStudioVersion)\Bin\Microsoft.CSharp.targets</LanguageTargets-->
-    <ApplicationIcon>script_badge.ico</ApplicationIcon>
+    <ApplicationIcon>logo.ico</ApplicationIcon>
     <OutputType>WinExe</OutputType>
     <StartupObject>TestApp.App</StartupObject>
-    <Platforms>x86</Platforms>
-    <Configurations>Debug;Release</Configurations>    
+    <Platforms>x86;AnyCPU</Platforms>
+    <Configurations>Debug;Release;LinuxDebug</Configurations>
+    <UseWPF>true</UseWPF>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <RollForward>Major</RollForward>
   </PropertyGroup>
 
   <PropertyGroup>
     <AssemblyTitle>1Script ui host</AssemblyTitle>
   </PropertyGroup>
 
+  <PropertyGroup Condition=" '$(Configuration)' == 'LinuxDebug' ">
+    <DebugSymbols Condition=" '$(DebugSymbols)' == '' ">true</DebugSymbols>
+    <Optimize Condition=" '$(Optimize)' == '' ">false</Optimize>
+  </PropertyGroup>
+
   <ItemGroup>
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Xaml" />
-    <Reference Include="WindowsBase" />
-    <Reference Include="PresentationCore" />
-    <Reference Include="PresentationFramework" />
-  </ItemGroup>
-  <ItemGroup>
-	  <ApplicationDefinition Include="App.xaml">
-      <Generator>MSBuild:Compile</Generator>
-      <SubType>Designer</SubType>
-    </ApplicationDefinition>
-	
-	  <Page Include="**\*.xaml" Exclude="App.xaml">
-      <SubType>Designer</SubType>
-      <Generator>MSBuild:Compile</Generator>
-    </Page>
-    <Compile Update="**\*.xaml.cs" SubType="Code" DependentUpon="%(Filename)" />
-	
+	  
     <!-- Resources -->
     <Resource Include="Controls/1CV8Syntax.xshd" />
     <Resource Include="Resources/module_icons.png" />
-    <Resource Include="script_badge.ico" />
-    
-    <PackageReference Include="AvalonEdit" Version="4.4.2.9744" />
-	
-    <!-- Settings -->
-    <None Update="Properties\Settings.settings" Generator="SettingsSingleFileGenerator" LastGenOutput="Settings.Designer.cs" />
-    <Compile Update="Properties\Settings.Designer.cs" AutoGen="True" DependentUpon="Settings.settings" />
+    <Resource Include="logo.ico" />
 
+    <PackageReference Include="AvalonEdit" Version="6.0.1" />
+	
   </ItemGroup>
   
   <ItemGroup>
     <ProjectReference Include="..\ScriptEngine.HostedScript\ScriptEngine.HostedScript.csproj" />
     <ProjectReference Include="..\ScriptEngine\ScriptEngine.csproj" />
   </ItemGroup>
-  <Import Project="$(MSBuildSDKExtrasTargets)" Condition="Exists('$(MSBuildSDKExtrasTargets)')" />
   
 </Project>
